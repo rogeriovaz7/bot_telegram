@@ -1,4 +1,6 @@
-python-telegram-bot==20.3
+python-telegram-bot==20.6
 fastapi
 uvicorn
-python-dotenv
+qrcode
+pysqlite3-binary
+openai
