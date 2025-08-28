@@ -4,12 +4,12 @@ import os
 import qrcode
 import asyncio
 from fastapi import FastAPI, Request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from openai import OpenAI
 
 # =========================
-# CONFIGURAÇÃO
+# CONFIGURAÇÃO VIA VARIÁVEIS DE AMBIENTE
 # =========================
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
@@ -25,7 +25,6 @@ if not TOKEN or not OPENAI_API_KEY or not ADMIN_ID or not RENDER_URL:
 client = OpenAI(api_key=OPENAI_API_KEY)
 DB_FILE = "pedidos.db"
 os.makedirs("qrcodes", exist_ok=True)
-bot = Bot(token=TOKEN)
 
 # =========================
 # BANCO DE DADOS
@@ -79,7 +78,7 @@ def criar_instrucao_skrill(preco, produto):
         f"⚠️ Após o pagamento, envie o comprovativo ao suporte."
     )
 
-def avisar_admin(produto, preco, user_name, user_id):
+async def avisar_admin(produto, preco, user_name, user_id, app):
     msg = (
         f"📦 Novo pedido recebido!\n"
         f"👤 Usuário: {user_name} ({user_id})\n"
@@ -87,10 +86,10 @@ def avisar_admin(produto, preco, user_name, user_id):
         f"💰 Preço: {preco}€\n"
         f"⏳ Aguardando confirmação de pagamento."
     )
-    asyncio.create_task(bot.send_message(chat_id=ADMIN_ID, text=msg))
+    await app.bot.send_message(chat_id=ADMIN_ID, text=msg)
 
 # =========================
-# HANDLERS
+# HANDLERS DO BOT
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🚀 Iniciar", callback_data="menu")]]
@@ -132,7 +131,7 @@ async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     user_name = query.from_user.full_name
     registrar_pedido(user_id, produto['nome'], produto['preco'], produto['link'])
-    avisar_admin(produto['nome'], produto['preco'], user_name, user_id)
+    await avisar_admin(produto['nome'], produto['preco'], user_name, user_id, context.application)
     qr_file = gerar_qrcode_mbway(user_id, item_id, produto['preco'])
     paypal_link = criar_link_paypal(produto['preco'])
     skrill_instrucao = criar_instrucao_skrill(produto['preco'], produto['nome'])
@@ -158,18 +157,19 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await comprar(update, context)
 
 # =========================
-# FASTAPI
+# FASTAPI + WEBHOOK
 # =========================
 app = FastAPI()
 application = Application.builder().token(TOKEN).build()
 
+# Handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(callback_router))
 
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
-    update = Update.de_json(data, bot)
+    update = Update.de_json(data, application.bot)
     await application.update_queue.put(update)
     return {"status": "ok"}
 
@@ -177,15 +177,13 @@ async def webhook(request: Request):
 def home():
     return {"status": "🤖 Bot IPTV Futurista ativo!"}
 
-# =========================
-# STARTUP & SHUTDOWN
-# =========================
 @app.on_event("startup")
 async def on_startup():
     await application.initialize()
     await application.start()
-    await application.bot.set_webhook(f"https://{RENDER_URL}/webhook")
-    print(f"🌐 Webhook configurado em https://{RENDER_URL}/webhook")
+    webhook_url = f"https://{RENDER_URL}/webhook"
+    await application.bot.set_webhook(webhook_url)
+    print(f"🌐 Webhook configurado: {webhook_url}")
 
 @app.on_event("shutdown")
 async def on_shutdown():
