@@ -163,9 +163,11 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = FastAPI()
 application = Application.builder().token(TOKEN).build()
 
-# Handlers
+# Registra os handlers
 application.add_handler(CommandHandler("start", start))
-application.add_handler(CallbackQueryHandler(callback_router))
+application.add_handler(CallbackQueryHandler(button))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -186,3 +188,4 @@ async def start_webhook():
 @app.on_event("startup")
 async def on_startup():
     asyncio.create_task(start_webhook())
+
