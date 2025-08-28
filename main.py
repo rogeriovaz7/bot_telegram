@@ -1,60 +1,63 @@
 import os
-from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.ext import Application, CommandHandler
+import asyncio
+from dotenv import load_dotenv
 
 # =========================
-# CONFIGURAÇÕES
+# Carregar variáveis do .env
 # =========================
-BOT_TOKEN = os.getenv("8185492934:AAFHaz_ACjMtomTL530H3j4mALFdt5EkLc0")  # token do BotFather
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "Roger584843+zav+")  # string forte
-PUBLIC_URL = os.getenv("https://bot-telegram-ztxa.onrender.com")  # URL do Render (ex: https://forward-bot.onrender.com)
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PUBLIC_URL = os.getenv("PUBLIC_URL")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
 if not BOT_TOKEN:
-    raise RuntimeError("⚠️ Defina a variável BOT_TOKEN no ambiente")
-
-# Cria a aplicação do Telegram
-telegram_app = Application.builder().token(BOT_TOKEN).build()
+    raise RuntimeError("⚠️ Defina a variável BOT_TOKEN no ambiente ou no arquivo .env")
 
 # =========================
-# HANDLERS DO BOT
-# =========================
-async def start(update, context):
-    await update.message.reply_text("🚀 Bot online via Webhook no Render!")
-
-async def echo(update, context):
-    await update.message.reply_text(f"Você disse: {update.message.text}")
-
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
-
-# =========================
-# FASTAPI
+# Inicializar o bot
 # =========================
 app = FastAPI()
+application = Application.builder().token(BOT_TOKEN).build()
 
+# Comando /start
+async def start(update: Update, context):
+    await update.message.reply_text("🚀 Bot online via Webhook!")
+
+application.add_handler(CommandHandler("start", start))
+
+# =========================
+# Webhook endpoint
+# =========================
+@app.post("/webhook")
+async def webhook(request: Request):
+    try:
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        await application.update_queue.put(update)
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+    return {"ok": True}
+
+# =========================
+# Startup: configurar webhook
+# =========================
 @app.on_event("startup")
 async def on_startup():
-    await telegram_app.initialize()
-    if PUBLIC_URL:
-        # Registra webhook no Telegram
-        await telegram_app.bot.set_webhook(
-            url=f"{PUBLIC_URL}/webhook",
-            secret_token=WEBHOOK_SECRET
-        )
-        print("✅ Webhook configurado:", f"{PUBLIC_URL}/webhook")
+    webhook_url = f"{PUBLIC_URL}/webhook"
+    await application.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
+    asyncio.create_task(application.initialize())
+    asyncio.create_task(application.start())
+    print(f"✅ Webhook configurado em {webhook_url}")
 
-@app.post("/webhook")
-async def webhook(
-    request: Request,
-    x_telegram_bot_api_secret_token: str | None = Header(default=None)
-):
-    # Segurança: só aceita requisições com o secret correto
-    if x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
-        raise HTTPException(status_code=401, detail="Token inválido")
-
-    data = await request.json()
-    update = Update.de_json(data, telegram_app.bot)
-
-    await telegram_app.process_update(update)
-    return {"ok": True}
+# =========================
+# Shutdown: parar bot
+# =========================
+@app.on_event("shutdown")
+async def on_shutdown():
+    await application.stop()
+    await application.shutdown()
