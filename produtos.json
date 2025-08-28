@@ -1,0 +1,30 @@
+{
+  "1": {
+    "nome": "IPTV - 1 Mês",
+    "preco": 10,
+    "descricao": "Plano de 1 mês de IPTV futurista 🚀",
+    "imagem": "banners/iptv_1mes.png",
+    "link": "https://www.paypal.com/paypalme/rojobest7/10"
+  },
+  "2": {
+    "nome": "IPTV - 3 Meses",
+    "preco": 25,
+    "descricao": "Plano de 3 meses de IPTV futurista 🌌",
+    "imagem": "banners/iptv_3meses.png",
+    "link": "https://www.paypal.com/paypalme/rojobest7/25"
+  },
+  "3": {
+    "nome": "IPTV - 6 Meses",
+    "preco": 45,
+    "descricao": "Plano de 6 meses de IPTV futurista ⚡",
+    "imagem": "banners/iptv_6meses.png",
+    "link": "https://www.paypal.com/paypalme/rojobest7/45"
+  },
+  "4": {
+    "nome": "IPTV - 12 Meses",
+    "preco": 70,
+    "descricao": "Plano de 12 meses de IPTV futurista ✨",
+    "imagem": "banners/iptv_12meses.png",
+    "link": "https://www.paypal.com/paypalme/rojobest7/70"
+  }
+}
