@@ -6,9 +6,9 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 # =========================
 # CONFIGURAÇÕES
 # =========================
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # token do BotFather
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "segredo123")  # string forte
-PUBLIC_URL = os.getenv("PUBLIC_URL")  # URL do Render (ex: https://forward-bot.onrender.com)
+BOT_TOKEN = os.getenv("8185492934:AAFHaz_ACjMtomTL530H3j4mALFdt5EkLc0")  # token do BotFather
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "Roger584843+zav+")  # string forte
+PUBLIC_URL = os.getenv("https://bot-telegram-ztxa.onrender.com")  # URL do Render (ex: https://forward-bot.onrender.com)
 
 if not BOT_TOKEN:
     raise RuntimeError("⚠️ Defina a variável BOT_TOKEN no ambiente")
@@ -58,3 +58,4 @@ async def webhook(
 
     await telegram_app.process_update(update)
     return {"ok": True}
+
