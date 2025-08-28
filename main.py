@@ -19,7 +19,6 @@ MBWAY_NUMERO = os.getenv("MBWAY_NUMERO")
 SKRILL_EMAIL = os.getenv("SKRILL_EMAIL")
 RENDER_URL = os.getenv("RENDER_URL")
 
-# Verificação básica
 if not TOKEN or not OPENAI_API_KEY or not ADMIN_ID or not RENDER_URL:
     raise RuntimeError("⚠️ Configure todas as variáveis de ambiente: BOT_TOKEN, ADMIN_ID, OPENAI_API_KEY, RENDER_URL")
 
@@ -93,7 +92,7 @@ def avisar_admin(produto, preco, user_name, user_id):
 # =========================
 # HANDLERS DO BOT
 # =========================
-async def boas_vindas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🚀 Iniciar", callback_data="menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
@@ -164,7 +163,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = FastAPI()
 application = Application.builder().token(TOKEN).build()
 
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, boas_vindas))
+# Handlers
+application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(callback_router))
 
 @app.post("/webhook")
@@ -178,11 +178,11 @@ async def webhook(request: Request):
 def home():
     return {"status": "🤖 Bot IPTV Futurista ativo!"}
 
-async def start():
+async def start_webhook():
     webhook_url = f"https://{RENDER_URL}/webhook"
     await application.bot.set_webhook(webhook_url)
     print(f"🌐 Webhook configurado: {webhook_url}")
 
 @app.on_event("startup")
 async def on_startup():
-    asyncio.create_task(start())
+    asyncio.create_task(start_webhook())
