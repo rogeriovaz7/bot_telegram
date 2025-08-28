@@ -1,63 +1,188 @@
+import json
+import sqlite3
 import os
+import qrcode
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from telegram import Update
-from telegram.ext import Application, CommandHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from openai import OpenAI
 import asyncio
-from dotenv import load_dotenv
 
 # =========================
-# Carregar variáveis do .env
+# CONFIGURAÇÃO VIA VARIÁVEIS DE AMBIENTE
 # =========================
-load_dotenv()
+TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+PAYPAL_USER = os.getenv("PAYPAL_USER")
+MBWAY_NUMERO = os.getenv("MBWAY_NUMERO")
+SKRILL_EMAIL = os.getenv("SKRILL_EMAIL")
+RENDER_URL = os.getenv("RENDER_URL")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-PUBLIC_URL = os.getenv("PUBLIC_URL")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+# Verificação básica
+if not TOKEN or not OPENAI_API_KEY or not ADMIN_ID or not RENDER_URL:
+    raise RuntimeError("⚠️ Configure todas as variáveis de ambiente: BOT_TOKEN, ADMIN_ID, OPENAI_API_KEY, RENDER_URL")
 
-if not BOT_TOKEN:
-    raise RuntimeError("⚠️ Defina a variável BOT_TOKEN no ambiente ou no arquivo .env")
+client = OpenAI(api_key=OPENAI_API_KEY)
+DB_FILE = "pedidos.db"
+os.makedirs("qrcodes", exist_ok=True)
+bot = Bot(token=TOKEN)
 
 # =========================
-# Inicializar o bot
+# BANCO DE DADOS
+# =========================
+conn = sqlite3.connect(DB_FILE)
+cursor = conn.cursor()
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS pedidos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    produto TEXT,
+    preco REAL,
+    status TEXT,
+    link TEXT
+)
+""")
+conn.commit()
+conn.close()
+
+with open("produtos.json", "r", encoding="utf-8") as f:
+    produtos = json.load(f)
+
+# =========================
+# FUNÇÕES DE PAGAMENTO E REGISTRO
+# =========================
+def registrar_pedido(user_id, produto, preco, link):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO pedidos (user_id, produto, preco, status, link) VALUES (?, ?, ?, ?, ?)",
+        (user_id, produto, preco, "pendente", link)
+    )
+    conn.commit()
+    conn.close()
+
+def criar_link_paypal(preco):
+    return f"https://www.paypal.com/paypalme/{PAYPAL_USER}/{preco}"
+
+def gerar_qrcode_mbway(user_id, produto_id, preco):
+    texto = f"Pagar {preco}€ para MB WAY: {MBWAY_NUMERO}"
+    qr_file = f"qrcodes/{user_id}_{produto_id}.png"
+    img = qrcode.make(texto)
+    img.save(qr_file)
+    return qr_file
+
+def criar_instrucao_skrill(preco, produto):
+    return (
+        f"💳 Para pagar com *Skrill*:\n\n"
+        f"➡️ Envie {preco}€ para o email: *{SKRILL_EMAIL}*\n"
+        f"📝 Referência: *Compra IPTV - {produto}*\n\n"
+        f"⚠️ Após o pagamento, envie o comprovativo ao suporte."
+    )
+
+def avisar_admin(produto, preco, user_name, user_id):
+    msg = (
+        f"📦 Novo pedido recebido!\n"
+        f"👤 Usuário: {user_name} ({user_id})\n"
+        f"📺 Produto: {produto}\n"
+        f"💰 Preço: {preco}€\n"
+        f"⏳ Aguardando confirmação de pagamento."
+    )
+    bot.send_message(chat_id=ADMIN_ID, text=msg)
+
+# =========================
+# HANDLERS DO BOT
+# =========================
+async def boas_vindas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[InlineKeyboardButton("🚀 Iniciar", callback_data="menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "👋 Bem-vindo à *Loja IPTV Futurista*!\n\nClique em *Iniciar* para ver os planos disponíveis.",
+        parse_mode="Markdown",
+        reply_markup=reply_markup
+    )
+
+async def mostrar_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    keyboard = [
+        [InlineKeyboardButton(f"📺 {produto['nome']} - {produto['preco']}€", callback_data=f"produto_{key}")]
+        for key, produto in produtos.items()
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.message.reply_text("🚀 Escolha um dos planos IPTV futuristas abaixo:", reply_markup=reply_markup)
+
+async def mostrar_produto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    item_id = query.data.replace("produto_", "")
+    produto = produtos[item_id]
+    caption = f"📺 *{produto['nome']}*\n💰 {produto['preco']}€\n\nℹ️ {produto['descricao']}"
+    keyboard = [
+        [InlineKeyboardButton("🛒 Comprar Agora", callback_data=f"comprar_{item_id}")],
+        [InlineKeyboardButton("⬅️ Voltar ao Menu", callback_data="menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.message.reply_photo(open(produto["imagem"], "rb"), caption=caption, parse_mode="Markdown", reply_markup=reply_markup)
+
+async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    item_id = query.data.replace("comprar_", "")
+    produto = produtos[item_id]
+    user_id = query.from_user.id
+    user_name = query.from_user.full_name
+    registrar_pedido(user_id, produto['nome'], produto['preco'], produto['link'])
+    avisar_admin(produto['nome'], produto['preco'], user_name, user_id)
+    qr_file = gerar_qrcode_mbway(user_id, item_id, produto['preco'])
+    paypal_link = criar_link_paypal(produto['preco'])
+    skrill_instrucao = criar_instrucao_skrill(produto['preco'], produto['nome'])
+    mensagem = (
+        f"✅ Você escolheu: *{produto['nome']}* - {produto['preco']}€\n\n"
+        f"📺 {produto['descricao']}\n\n"
+        f"💳 Métodos de Pagamento:\n"
+        f"👉 PayPal: {paypal_link}\n"
+        f"👉 MB WAY: *{MBWAY_NUMERO}* (QR code abaixo)\n"
+        f"👉 Skrill: veja instruções abaixo 👇\n\n"
+        f"{skrill_instrucao}\n\n"
+        "Após o pagamento, aguarde liberação do acesso."
+    )
+    await query.message.reply_photo(open(qr_file, "rb"), caption=mensagem, parse_mode="Markdown")
+
+async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.data == "menu":
+        await mostrar_menu(update, context)
+    elif query.data.startswith("produto_"):
+        await mostrar_produto(update, context)
+    elif query.data.startswith("comprar_"):
+        await comprar(update, context)
+
+# =========================
+# FASTAPI + WEBHOOK
 # =========================
 app = FastAPI()
-application = Application.builder().token(BOT_TOKEN).build()
+application = Application.builder().token(TOKEN).build()
 
-# Comando /start
-async def start(update: Update, context):
-    await update.message.reply_text("🚀 Bot online via Webhook!")
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, boas_vindas))
+application.add_handler(CallbackQueryHandler(callback_router))
 
-application.add_handler(CommandHandler("start", start))
-
-# =========================
-# Webhook endpoint
-# =========================
 @app.post("/webhook")
 async def webhook(request: Request):
-    try:
-        data = await request.json()
-        update = Update.de_json(data, application.bot)
-        await application.update_queue.put(update)
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-    return {"ok": True}
+    data = await request.json()
+    update = Update.de_json(data, bot)
+    await application.update_queue.put(update)
+    return {"status": "ok"}
 
-# =========================
-# Startup: configurar webhook
-# =========================
+@app.get("/")
+def home():
+    return {"status": "🤖 Bot IPTV Futurista ativo!"}
+
+async def start():
+    webhook_url = f"https://{RENDER_URL}/webhook"
+    await application.bot.set_webhook(webhook_url)
+    print(f"🌐 Webhook configurado: {webhook_url}")
+
 @app.on_event("startup")
 async def on_startup():
-    webhook_url = f"{PUBLIC_URL}/webhook"
-    await application.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
-    asyncio.create_task(application.initialize())
-    asyncio.create_task(application.start())
-    print(f"✅ Webhook configurado em {webhook_url}")
-
-# =========================
-# Shutdown: parar bot
-# =========================
-@app.on_event("shutdown")
-async def on_shutdown():
-    await application.stop()
-    await application.shutdown()
+    asyncio.create_task(start())
