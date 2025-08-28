@@ -2,14 +2,14 @@ import json
 import sqlite3
 import os
 import qrcode
+import asyncio
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from openai import OpenAI
-import asyncio
 
 # =========================
-# CONFIGURAÇÃO VIA VARIÁVEIS DE AMBIENTE
+# CONFIGURAÇÃO
 # =========================
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
@@ -87,10 +87,10 @@ def avisar_admin(produto, preco, user_name, user_id):
         f"💰 Preço: {preco}€\n"
         f"⏳ Aguardando confirmação de pagamento."
     )
-    bot.send_message(chat_id=ADMIN_ID, text=msg)
+    asyncio.create_task(bot.send_message(chat_id=ADMIN_ID, text=msg))
 
 # =========================
-# HANDLERS DO BOT
+# HANDLERS
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🚀 Iniciar", callback_data="menu")]]
@@ -158,16 +158,13 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await comprar(update, context)
 
 # =========================
-# FASTAPI + WEBHOOK
+# FASTAPI
 # =========================
 app = FastAPI()
 application = Application.builder().token(TOKEN).build()
 
-# Registra os handlers
 application.add_handler(CommandHandler("start", start))
-application.add_handler(CallbackQueryHandler(button))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
+application.add_handler(CallbackQueryHandler(callback_router))
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -180,12 +177,17 @@ async def webhook(request: Request):
 def home():
     return {"status": "🤖 Bot IPTV Futurista ativo!"}
 
-async def start_webhook():
-    webhook_url = f"https://{RENDER_URL}/webhook"
-    await application.bot.set_webhook(webhook_url)
-    print(f"🌐 Webhook configurado: {webhook_url}")
-
+# =========================
+# STARTUP & SHUTDOWN
+# =========================
 @app.on_event("startup")
 async def on_startup():
-    asyncio.create_task(start_webhook())
+    await application.initialize()
+    await application.start()
+    await application.bot.set_webhook(f"https://{RENDER_URL}/webhook")
+    print(f"🌐 Webhook configurado em https://{RENDER_URL}/webhook")
 
+@app.on_event("shutdown")
+async def on_shutdown():
+    await application.stop()
+    await application.shutdown()
