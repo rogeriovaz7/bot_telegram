@@ -32,7 +32,6 @@ if not TOKEN or not OPENAI_API_KEY or not ADMIN_ID or not RENDER_URL:
 client = OpenAI(api_key=OPENAI_API_KEY)
 DB_FILE = "pedidos.db"
 os.makedirs("qrcodes", exist_ok=True)
-bot = Bot(token=TOKEN)
 
 # =========================
 # BANCO DE DADOS
@@ -100,7 +99,8 @@ async def avisar_admin(produto, preco, user_name, user_id):
         f"💰 Preço: {preco}€\n"
         f"⏳ Aguardando confirmação de pagamento."
     )
-    await bot.send_message(chat_id=ADMIN_ID, text=msg)
+    await application.bot.send_message(chat_id=ADMIN_ID, text=msg)
+
 
 
 # =========================
@@ -201,7 +201,8 @@ application.add_handler(CallbackQueryHandler(callback_router))
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
-    update = Update.de_json(data, bot)
+    update = Update.de_json(data, application.bot)
+
     await application.update_queue.put(update)
     return {"status": "ok"}
 
@@ -228,4 +229,5 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await application.stop()
+
 
