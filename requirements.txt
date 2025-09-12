@@ -4,4 +4,6 @@ uvicorn
 qrcode
 pysqlite3-binary
 openai
+Pillow
+
 
