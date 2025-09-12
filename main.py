@@ -189,7 +189,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # FASTAPI + WEBHOOK
 # =========================
 app = FastAPI()
-application = Application.builder().token(TOKEN).build()
+from telegram.ext import Application
+
+application = Application.builder().token(TOKEN).updater(None).build()
 
 # Registrar handlers
 application.add_handler(CommandHandler("start", start))
@@ -226,3 +228,4 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await application.stop()
+
