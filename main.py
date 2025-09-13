@@ -38,6 +38,8 @@ os.makedirs("qrcodes", exist_ok=True)
 # =========================
 conn = sqlite3.connect(DB_FILE)
 cursor = conn.cursor()
+
+# Tabela de pedidos
 cursor.execute(
     """
 CREATE TABLE IF NOT EXISTS pedidos (
@@ -50,11 +52,22 @@ CREATE TABLE IF NOT EXISTS pedidos (
 )
 """
 )
+
+# Tabela de usuários (para intro)
+cursor.execute(
+    """
+CREATE TABLE IF NOT EXISTS usuarios (
+    user_id INTEGER PRIMARY KEY
+)
+"""
+)
+
 conn.commit()
 conn.close()
 
 with open("produtos.json", "r", encoding="utf-8") as f:
     produtos = json.load(f)
+
 
 # =========================
 # FUNÇÕES DE PAGAMENTO E REGISTRO
@@ -102,11 +115,28 @@ async def avisar_admin(produto, preco, user_name, user_id):
     await application.bot.send_message(chat_id=ADMIN_ID, text=msg)
 
 
-
 # =========================
 # HANDLERS DO BOT
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM usuarios WHERE user_id = ?", (user_id,))
+    visto = cursor.fetchone()
+
+    if not visto:
+        # Enviar intro só na primeira vez
+        intro_path = "intro.mp4"  # Coloque o vídeo na raiz do projeto
+        if os.path.exists(intro_path):
+            await update.message.reply_video(open(intro_path, "rb"), caption="🚀 Bem-vindo à Loja IPTV Futurista!")
+        # Registra que já viu
+        cursor.execute("INSERT INTO usuarios (user_id) VALUES (?)", (user_id,))
+        conn.commit()
+
+    conn.close()
+
     keyboard = [[InlineKeyboardButton("🚀 Iniciar", callback_data="menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
@@ -189,8 +219,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # FASTAPI + WEBHOOK
 # =========================
 app = FastAPI()
-from telegram.ext import Application
-
 application = Application.builder().token(TOKEN).updater(None).build()
 
 # Registrar handlers
@@ -220,7 +248,6 @@ async def start_webhook():
 
 @app.on_event("startup")
 async def on_startup():
-    # Inicializar e iniciar bot
     await application.initialize()
     await application.start()
     asyncio.create_task(start_webhook())
