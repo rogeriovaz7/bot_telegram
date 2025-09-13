@@ -128,7 +128,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not visto:
         # Enviar intro só na primeira vez
-        intro_path = "intro.mp4"  # Coloque o vídeo na raiz do projeto
+        intro_path = os.path.join("banners", "intro.mp4")
+
         if os.path.exists(intro_path):
             await update.message.reply_video(open(intro_path, "rb"), caption="🚀 Bem-vindo à Loja IPTV Futurista!")
         # Registra que já viu
@@ -256,5 +257,6 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await application.stop()
+
 
 
