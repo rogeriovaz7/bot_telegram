@@ -19,14 +19,13 @@ from telegram.ext import (
 # =========================
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-GROK_API_KEY = os.getenv("GROK_API_KEY")
+HF_TOKEN = os.getenv("HF_TOKEN")  # HuggingFace grátis
 PAYPAL_USER = os.getenv("PAYPAL_USER")
 RENDER_URL = os.getenv("RENDER_URL")
 
-if not TOKEN or not ADMIN_ID or not GROK_API_KEY or not RENDER_URL:
-    raise RuntimeError("⚠️ Configure BOT_TOKEN, ADMIN_ID, GROK_API_KEY, PAYPAL_USER, RENDER_URL")
+if not TOKEN or not ADMIN_ID or not HF_TOKEN or not RENDER_URL:
+    raise RuntimeError("⚠️ Configure BOT_TOKEN, ADMIN_ID, HF_TOKEN, PAYPAL_USER, RENDER_URL")
 
-GROK_API_URL = "https://api.x.ai/v1/completions"
 DB_FILE = "pedidos.db"
 
 # =========================
@@ -181,7 +180,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await comprar(update, context)
 
 # =========================
-# FUNÇÕES DE HISTÓRICO E GROK AVANÇADO
+# HISTÓRICO E IA (HuggingFace grátis)
 # =========================
 def salvar_historico(user_id, role, mensagem):
     conn = sqlite3.connect(DB_FILE)
@@ -202,44 +201,41 @@ def resumir_historico(user_id, max_msgs=10):
     )
     rows = cursor.fetchall()
     conn.close()
-    rows = rows[::-1]  # mensagens antigas primeiro
+    rows = rows[::-1]  # mais antigas primeiro
     return [{"role": r, "content": m} for r, m in rows]
 
-def obter_resposta_grok_avancado(pergunta: str, user_id: int, tom="simpatico") -> str:
-    headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
+def obter_resposta_ia_gratis(pergunta: str, user_id: int, tom="simpatico") -> str:
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     historico_resumido = resumir_historico(user_id)
     lista_produtos = "\n".join(
         [f"- {k}: {p['nome']} ({p['preco']}€) → {p['descricao']}" for k, p in produtos.items()]
     )
+    prompt = f"""
+Você é um assistente da Loja IPTV Futurista. Responda de forma {tom}.
+Produtos disponíveis:
+{lista_produtos}
 
-    mensagens = [
-        {"role": "system", 
-         "content": f"Você é um assistente da Loja IPTV Futurista. Responda de forma {tom}. "
-                    f"Produtos:\n{lista_produtos}. "
-                    "Inclua links ou sugestões de produtos quando apropriado."}
-    ]
-    mensagens.extend(historico_resumido)
-    mensagens.append({"role": "user", "content": pergunta})
+Histórico:
+{''.join([f'{m['role']}: {m['content']}\n' for m in historico_resumido])}
 
-    payload = {"model": "grok-4", "messages": mensagens}
-
+User: {pergunta}
+"""
+    url = "https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3-8B-Instruct"
     try:
-        response = requests.post(GROK_API_URL, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        resposta = data['choices'][0]['message']['content']
+        resp = requests.post(url, headers=headers, json={"inputs": prompt}, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        resposta = data[0]["generated_text"] if isinstance(data, list) and "generated_text" in data[0] else "🤖 Não consegui gerar resposta."
         salvar_historico(user_id, "user", pergunta)
         salvar_historico(user_id, "assistant", resposta)
         return resposta
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         return f"🤖 Ocorreu um erro ao contactar a IA: {e}"
-    except KeyError:
-        return "🤖 A IA não retornou uma resposta válida."
 
 async def responder_ia_avancado(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     pergunta = update.message.text
-    resposta = obter_resposta_grok_avancado(pergunta, user_id, tom="simpatico")
+    resposta = obter_resposta_ia_gratis(pergunta, user_id)
 
     # Sugestões automáticas de produtos
     keyboard = []
@@ -272,7 +268,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 def home():
-    return {"status": "🤖 Bot IPTV Futurista com Grok AI PREMIUM ativo!"}
+    return {"status": "🤖 Bot IPTV Futurista com HuggingFace IA PREMIUM ativo!"}
 
 
 async def start_webhook():
@@ -291,5 +287,4 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await application.stop()
-
 
