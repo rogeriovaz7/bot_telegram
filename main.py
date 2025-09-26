@@ -1,37 +1,35 @@
 import json
 import sqlite3
 import os
-import qrcode
 import asyncio
+import requests
 from fastapi import FastAPI, Request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
+    filters,
     ContextTypes,
 )
 from openai import OpenAI
 
 # =========================
-# CONFIGURAÇÃO VIA VARIÁVEIS DE AMBIENTE
+# CONFIGURAÇÃO
 # =========================
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # opcional
+HF_TOKEN = os.getenv("HF_TOKEN")  # token grátis do HuggingFace
 PAYPAL_USER = os.getenv("PAYPAL_USER")
-MBWAY_NUMERO = os.getenv("MBWAY_NUMERO")
-SKRILL_EMAIL = os.getenv("SKRILL_EMAIL")
 RENDER_URL = os.getenv("RENDER_URL")
 
-if not TOKEN or not OPENAI_API_KEY or not ADMIN_ID or not RENDER_URL:
-    raise RuntimeError(
-        "⚠️ Configure todas as variáveis de ambiente: BOT_TOKEN, ADMIN_ID, OPENAI_API_KEY, RENDER_URL"
-    )
+if not TOKEN or not ADMIN_ID or not RENDER_URL:
+    raise RuntimeError("⚠️ Configure BOT_TOKEN, ADMIN_ID, PAYPAL_USER, RENDER_URL")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 DB_FILE = "pedidos.db"
-os.makedirs("qrcodes", exist_ok=True)
 
 # =========================
 # BANCO DE DADOS
@@ -39,7 +37,6 @@ os.makedirs("qrcodes", exist_ok=True)
 conn = sqlite3.connect(DB_FILE)
 cursor = conn.cursor()
 
-# Tabela de pedidos
 cursor.execute(
     """
 CREATE TABLE IF NOT EXISTS pedidos (
@@ -53,7 +50,6 @@ CREATE TABLE IF NOT EXISTS pedidos (
 """
 )
 
-# Tabela de usuários (para intro)
 cursor.execute(
     """
 CREATE TABLE IF NOT EXISTS usuarios (
@@ -70,7 +66,7 @@ with open("produtos.json", "r", encoding="utf-8") as f:
 
 
 # =========================
-# FUNÇÕES DE PAGAMENTO E REGISTRO
+# FUNÇÕES DE LOJA
 # =========================
 def registrar_pedido(user_id, produto, preco, link):
     conn = sqlite3.connect(DB_FILE)
@@ -87,23 +83,6 @@ def criar_link_paypal(preco):
     return f"https://www.paypal.com/paypalme/{PAYPAL_USER}/{preco}"
 
 
-def gerar_qrcode_mbway(user_id, produto_id, preco):
-    texto = f"Pagar {preco}€ para MB WAY: {MBWAY_NUMERO}"
-    qr_file = f"qrcodes/{user_id}_{produto_id}.png"
-    img = qrcode.make(texto)
-    img.save(qr_file)
-    return qr_file
-
-
-def criar_instrucao_skrill(preco, produto):
-    return (
-        f"💳 Para pagar com *Skrill*:\n\n"
-        f"➡️ Envie {preco}€ para o email: *{SKRILL_EMAIL}*\n"
-        f"📝 Referência: *Compra IPTV - {produto}*\n\n"
-        f"⚠️ Após o pagamento, envie o comprovativo ao suporte."
-    )
-
-
 async def avisar_admin(produto, preco, user_name, user_id):
     msg = (
         f"📦 Novo pedido recebido!\n"
@@ -116,32 +95,14 @@ async def avisar_admin(produto, preco, user_name, user_id):
 
 
 # =========================
-# HANDLERS DO BOT
+# HANDLERS DA LOJA
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM usuarios WHERE user_id = ?", (user_id,))
-    visto = cursor.fetchone()
-
-    if not visto:
-        # Enviar intro só na primeira vez
-        intro_path = os.path.join("banners", "intro.mp4")
-
-        if os.path.exists(intro_path):
-            await update.message.reply_video(open(intro_path, "rb"), caption="🚀 Bem-vindo à Loja IPTV Futurista!")
-        # Registra que já viu
-        cursor.execute("INSERT INTO usuarios (user_id) VALUES (?)", (user_id,))
-        conn.commit()
-
-    conn.close()
-
-    keyboard = [[InlineKeyboardButton("🚀 Iniciar", callback_data="menu")]]
+    keyboard = [[InlineKeyboardButton("🚀 Iniciar Loja", callback_data="menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "👋 Bem-vindo à *Loja IPTV Futurista*!\n\nClique em *Iniciar* para ver os planos disponíveis.",
+        "👋 Bem-vindo à *Loja IPTV Futurista*!\n\nClique em *Iniciar Loja* para ver os planos disponíveis.\n\n"
+        "💡 Também pode conversar comigo — sou uma IA que responde dúvidas e ajuda a escolher o plano certo.",
         parse_mode="Markdown",
         reply_markup=reply_markup,
     )
@@ -160,9 +121,7 @@ async def mostrar_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for key, produto in produtos.items()
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.message.reply_text(
-        "🚀 Escolha um dos planos IPTV futuristas abaixo:", reply_markup=reply_markup
-    )
+    await query.message.reply_text("🚀 Escolha um dos planos IPTV futuristas abaixo:", reply_markup=reply_markup)
 
 
 async def mostrar_produto(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -177,7 +136,10 @@ async def mostrar_produto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.message.reply_photo(
-        open(produto["imagem"], "rb"), caption=caption, parse_mode="Markdown", reply_markup=reply_markup
+        open(produto["imagem"], "rb"),
+        caption=caption,
+        parse_mode="Markdown",
+        reply_markup=reply_markup,
     )
 
 
@@ -190,20 +152,22 @@ async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = query.from_user.full_name
     registrar_pedido(user_id, produto["nome"], produto["preco"], produto["link"])
     await avisar_admin(produto["nome"], produto["preco"], user_name, user_id)
-    qr_file = gerar_qrcode_mbway(user_id, item_id, produto["preco"])
+
     paypal_link = criar_link_paypal(produto["preco"])
-    skrill_instrucao = criar_instrucao_skrill(produto["preco"], produto["nome"])
+
     mensagem = (
         f"✅ Você escolheu: *{produto['nome']}* - {produto['preco']}€\n\n"
         f"📺 {produto['descricao']}\n\n"
-        f"💳 Métodos de Pagamento:\n"
-        f"👉 PayPal: {paypal_link}\n"
-        f"👉 MB WAY: *{MBWAY_NUMERO}* (QR code abaixo)\n"
-        f"👉 Skrill: veja instruções abaixo 👇\n\n"
-        f"{skrill_instrucao}\n\n"
-        "Após o pagamento, aguarde liberação do acesso."
+        f"💳 Pague com PayPal: {paypal_link}\n\n"
+        f"📩 Após realizar o pagamento, envie o comprovativo aqui no Telegram.\n"
+        f"⏳ Seu pedido será validado e liberado em breve."
     )
-    await query.message.reply_photo(open(qr_file, "rb"), caption=mensagem, parse_mode="Markdown")
+
+    await query.message.reply_photo(
+        open(produto["imagem"], "rb"),
+        caption=mensagem,
+        parse_mode="Markdown",
+    )
 
 
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -217,28 +181,80 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
+# HANDLER DE IA
+# =========================
+async def responder_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pergunta = update.message.text
+
+    lista_produtos = "\n".join(
+        [f"- {k}: {p['nome']} ({p['preco']}€) → {p['descricao']}" for k, p in produtos.items()]
+    )
+
+    prompt = f"""
+Você é um assistente da Loja IPTV Futurista.
+
+Produtos disponíveis:
+{lista_produtos}
+
+Tarefas:
+- Responda dúvidas normais do utilizador.
+- Se mencionar preço, tempo ou plano, recomende o mais adequado.
+- Responda de forma simpática, curta e clara.
+"""
+
+    resposta = None
+    if client:  # usa OpenAI se disponível
+        resposta = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": pergunta},
+            ],
+        ).choices[0].message.content
+    elif HF_TOKEN:  # fallback HuggingFace grátis
+        url = "https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3-8B-Instruct"
+        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        payload = {"inputs": prompt + "\nUser: " + pergunta}
+        resp = requests.post(url, headers=headers, json=payload)
+        data = resp.json()
+        resposta = data[0]["generated_text"] if isinstance(data, list) else "Desculpe, não consegui responder."
+
+    if not resposta:
+        resposta = "🤖 Desculpe, não consegui responder agora."
+
+    # Se a resposta indicar um produto, mostramos os botões
+    keyboard = []
+    for key, p in produtos.items():
+        if str(p["preco"]) in resposta or p["nome"].lower() in resposta.lower():
+            keyboard.append([InlineKeyboardButton(f"🛒 Comprar {p['nome']}", callback_data=f"comprar_{key}")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    await update.message.reply_text(resposta, reply_markup=reply_markup)
+
+
+# =========================
 # FASTAPI + WEBHOOK
 # =========================
 app = FastAPI()
 application = Application.builder().token(TOKEN).updater(None).build()
 
-# Registrar handlers
+# Handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(callback_router))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder_ia))
 
 
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
     update = Update.de_json(data, application.bot)
-
     await application.update_queue.put(update)
     return {"status": "ok"}
 
 
 @app.get("/")
 def home():
-    return {"status": "🤖 Bot IPTV Futurista ativo!"}
+    return {"status": "🤖 Bot IPTV Futurista com IA ativo!"}
 
 
 async def start_webhook():
