@@ -19,11 +19,11 @@ from telegram.ext import (
 # =========================
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-HF_TOKEN = os.getenv("HF_TOKEN")  # HuggingFace grátis
+HF_TOKEN = os.getenv("HF_TOKEN")  # Token HuggingFace gratuito
 PAYPAL_USER = os.getenv("PAYPAL_USER")
 RENDER_URL = os.getenv("RENDER_URL")
 
-if not TOKEN or not ADMIN_ID or not HF_TOKEN or not RENDER_URL:
+if not TOKEN or not ADMIN_ID or not HF_TOKEN or not PAYPAL_USER or not RENDER_URL:
     raise RuntimeError("⚠️ Configure BOT_TOKEN, ADMIN_ID, HF_TOKEN, PAYPAL_USER, RENDER_URL")
 
 DB_FILE = "pedidos.db"
@@ -34,8 +34,7 @@ DB_FILE = "pedidos.db"
 conn = sqlite3.connect(DB_FILE)
 cursor = conn.cursor()
 
-cursor.execute(
-    """
+cursor.execute("""
 CREATE TABLE IF NOT EXISTS pedidos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
@@ -44,27 +43,22 @@ CREATE TABLE IF NOT EXISTS pedidos (
     status TEXT,
     link TEXT
 )
-"""
-)
+""")
 
-cursor.execute(
-    """
+cursor.execute("""
 CREATE TABLE IF NOT EXISTS usuarios (
     user_id INTEGER PRIMARY KEY
 )
-"""
-)
+""")
 
-cursor.execute(
-    """
+cursor.execute("""
 CREATE TABLE IF NOT EXISTS historico (
     user_id INTEGER,
     role TEXT,
     mensagem TEXT,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 )
-"""
-)
+""")
 
 conn.commit()
 conn.close()
@@ -115,13 +109,8 @@ async def mostrar_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     keyboard = [
-        [
-            InlineKeyboardButton(
-                f"📺 {produto['nome']} - {produto['preco']}€",
-                callback_data=f"produto_{key}",
-            )
-        ]
-        for key, produto in produtos.items()
+        [InlineKeyboardButton(f"📺 {p['nome']} - {p['preco']}€", callback_data=f"produto_{k}")]
+        for k, p in produtos.items()
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.message.reply_text("🚀 Escolha um dos planos IPTV futuristas abaixo:", reply_markup=reply_markup)
@@ -155,7 +144,6 @@ async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await avisar_admin(produto["nome"], produto["preco"], user_name, user_id)
 
     paypal_link = criar_link_paypal(produto["preco"])
-
     mensagem = (
         f"✅ Você escolheu: *{produto['nome']}* - {produto['preco']}€\n\n"
         f"📺 {produto['descricao']}\n\n"
@@ -163,7 +151,6 @@ async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📩 Após realizar o pagamento, envie o comprovativo aqui no Telegram.\n"
         f"⏳ Seu pedido será validado e liberado em breve."
     )
-
     await query.message.reply_photo(
         open(produto["imagem"], "rb"),
         caption=mensagem,
@@ -201,31 +188,36 @@ def resumir_historico(user_id, max_msgs=10):
     )
     rows = cursor.fetchall()
     conn.close()
-    rows = rows[::-1]  # mais antigas primeiro
+    rows = rows[::-1]
     return [{"role": r, "content": m} for r, m in rows]
 
 def obter_resposta_ia_gratis(pergunta: str, user_id: int, tom="simpatico") -> str:
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    historico_resumido = resumir_historico(user_id)
+    """
+    IA grátis usando HuggingFace OpenAssistant
+    """
     lista_produtos = "\n".join(
         [f"- {k}: {p['nome']} ({p['preco']}€) → {p['descricao']}" for k, p in produtos.items()]
     )
-    prompt = f"""
-Você é um assistente da Loja IPTV Futurista. Responda de forma {tom}.
-Produtos disponíveis:
-{lista_produtos}
+    historico = resumir_historico(user_id)
+    
+    prompt = f"Você é um assistente da Loja IPTV Futurista. Responda de forma {tom}.\n\n"
+    prompt += "Produtos disponíveis:\n" + lista_produtos + "\n\n"
+    prompt += "Histórico:\n"
+    for m in historico:
+        prompt += f"{m['role']}: {m['content']}\n"
+    prompt += f"User: {pergunta}"
 
-Histórico:
-{''.join([f'{m['role']}: {m['content']}\n' for m in historico_resumido])}
+    url = "https://api-inference.huggingface.co/models/OpenAssistant/oasst-sft-1-pythia-12b"
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 
-User: {pergunta}
-"""
-   url = "https://api-inference.huggingface.co/models/OpenAssistant/oasst-sft-1-pythia-12b"
     try:
         resp = requests.post(url, headers=headers, json={"inputs": prompt}, timeout=30)
         resp.raise_for_status()
         data = resp.json()
-        resposta = data[0]["generated_text"] if isinstance(data, list) and "generated_text" in data[0] else "🤖 Não consegui gerar resposta."
+        if isinstance(data, list) and "generated_text" in data[0]:
+            resposta = data[0]["generated_text"]
+        else:
+            resposta = "🤖 Não consegui gerar resposta."
         salvar_historico(user_id, "user", pergunta)
         salvar_historico(user_id, "assistant", resposta)
         return resposta
@@ -236,13 +228,10 @@ async def responder_ia_avancado(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = update.message.from_user.id
     pergunta = update.message.text
     resposta = obter_resposta_ia_gratis(pergunta, user_id)
-
-    # Sugestões automáticas de produtos
     keyboard = []
     for key, p in produtos.items():
         if str(p["preco"]) in resposta or p["nome"].lower() in resposta.lower():
             keyboard.append([InlineKeyboardButton(f"🛒 Comprar {p['nome']}", callback_data=f"comprar_{key}")])
-
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     await update.message.reply_text(resposta, reply_markup=reply_markup)
 
@@ -252,11 +241,9 @@ async def responder_ia_avancado(update: Update, context: ContextTypes.DEFAULT_TY
 app = FastAPI()
 application = Application.builder().token(TOKEN).updater(None).build()
 
-# Handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(callback_router))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder_ia_avancado))
-
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -265,17 +252,14 @@ async def webhook(request: Request):
     await application.update_queue.put(update)
     return {"status": "ok"}
 
-
 @app.get("/")
 def home():
-    return {"status": "🤖 Bot IPTV Futurista com HuggingFace IA PREMIUM ativo!"}
-
+    return {"status": "🤖 Bot IPTV Futurista com IA HuggingFace grátis ativo!"}
 
 async def start_webhook():
     webhook_url = f"https://{RENDER_URL}/webhook"
     await application.bot.set_webhook(webhook_url)
     print(f"🌐 Webhook configurado: {webhook_url}")
-
 
 @app.on_event("startup")
 async def on_startup():
@@ -283,10 +267,6 @@ async def on_startup():
     await application.start()
     asyncio.create_task(start_webhook())
 
-
 @app.on_event("shutdown")
 async def on_shutdown():
     await application.stop()
-
-
-
