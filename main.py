@@ -1,11 +1,11 @@
 
 import os
+import asyncio
 from fastapi import FastAPI, Request
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# ===================== CONFIGURAÇÃO =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 PAYPAL_USER = os.getenv("PAYPAL_USER")
@@ -14,8 +14,7 @@ TELEGRAM_USER = os.getenv("MEU_TELEGRAM")
 if not all([BOT_TOKEN, ADMIN_ID, PAYPAL_USER, TELEGRAM_USER]):
     raise RuntimeError("⚠️ Configure BOT_TOKEN, ADMIN_ID, PAYPAL_USER e MEU_TELEGRAM")
 
-# ===================== DADOS =====================
-pendentes = {}  # user_id : plano
+pendentes = {}
 
 # ===================== FUNÇÕES =====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -37,7 +36,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     plano = query.data
     pendentes[user_id] = plano
-
     await query.message.reply_text(
         f"✅ Você escolheu <b>{plano.replace('_', ' ').title()}</b>.\n"
         f"💳 Pague via PayPal para: <b>{PAYPAL_USER}</b>\n"
@@ -45,7 +43,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML
     )
 
-# ===================== COMANDOS DE ADMIN =====================
 async def pendentes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -87,6 +84,24 @@ async def negar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===================== FASTAPI =====================
 app = FastAPI()
+application = None  # será inicializado depois
+
+@app.on_event("startup")
+async def startup():
+    global application
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    # Adiciona handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(CommandHandler("pendentes", pendentes_cmd))
+    application.add_handler(CommandHandler("confirmar", confirmar))
+    application.add_handler(CommandHandler("negar", negar))
+
+    # roda bot em background
+    asyncio.create_task(application.initialize())
+    asyncio.create_task(application.start())
+    asyncio.create_task(application.updater.start_polling())  # necessário para queue
 
 @app.post("/webhook")
 async def webhook(req: Request):
@@ -94,18 +109,3 @@ async def webhook(req: Request):
     update = Update.de_json(data, application.bot)
     await application.update_queue.put(update)
     return {"ok": True}
-
-# ===================== BOT =====================
-application = Application.builder().token(BOT_TOKEN).build()
-
-# Handlers
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CallbackQueryHandler(button))
-application.add_handler(CommandHandler("pendentes", pendentes_cmd))
-application.add_handler(CommandHandler("confirmar", confirmar))
-application.add_handler(CommandHandler("negar", negar))
-
-# ===================== EXECUÇÃO =====================
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
