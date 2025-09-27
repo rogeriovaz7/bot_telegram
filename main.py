@@ -1,5 +1,3 @@
-
-
 # main.py
 import os
 from fastapi import FastAPI, Request
@@ -7,33 +5,34 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# ===================== CONFIGURAÇÃO =====================
+# ================= CONFIGURAÇÃO =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 PAYPAL_USER = os.getenv("PAYPAL_USER")
 TELEGRAM_USER = os.getenv("MEU_TELEGRAM")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # ex: https://seu-dominio.com
 
-if not all([BOT_TOKEN, ADMIN_ID, PAYPAL_USER, TELEGRAM_USER]):
-    raise RuntimeError("⚠️ Configure BOT_TOKEN, ADMIN_ID, PAYPAL_USER e MEU_TELEGRAM")
+if not all([BOT_TOKEN, ADMIN_ID, PAYPAL_USER, TELEGRAM_USER, WEBHOOK_URL]):
+    raise RuntimeError("Configure BOT_TOKEN, ADMIN_ID, PAYPAL_USER, MEU_TELEGRAM e WEBHOOK_URL")
 
-# ===================== DADOS =====================
+# ================= DADOS =================
 pendentes = {}  # user_id : plano
 
-# ===================== BOT HANDLERS =====================
+# ================= HANDLERS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("💠 Plano Básico - 5€", callback_data="plano_basico")],
-        [InlineKeyboardButton("💎 Plano Premium - 10€", callback_data="plano_premium")],
-        [InlineKeyboardButton("⚡ Suporte / Contato", url=f"https://t.me/{TELEGRAM_USER}")]
+        [InlineKeyboardButton("Plano Básico - 5€", callback_data="plano_basico")],
+        [InlineKeyboardButton("Plano Premium - 10€", callback_data="plano_premium")],
+        [InlineKeyboardButton("Contato", url=f"https://t.me/{TELEGRAM_USER}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    message = (
-        "<b>🎰 Bem-vindo ao Bot Futurista!</b>\n"
+    await update.message.reply_text(
+        f"🎰 Bem-vindo ao Bot Futurista!\n\n"
         f"💳 Pague via PayPal: <b>{PAYPAL_USER}</b>\n"
-        f"📤 Depois, envie o comprovativo clicando no meu usuário: @{TELEGRAM_USER}\n\n"
-        "🛸 Menu futurista ativado!"
+        f"📤 Depois, envie o comprovativo clicando no meu usuário: @{TELEGRAM_USER}",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.HTML
     )
-    await update.message.reply_text(message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -52,73 +51,63 @@ async def pendentes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     if not pendentes:
-        await update.message.reply_text("💤 Nenhum pagamento pendente.")
+        await update.message.reply_text("Nenhum pagamento pendente.")
         return
-    text = "💼 <b>Pagamentos Pendentes:</b>\n"
+    text = "💼 Pagamentos Pendentes:\n"
     for uid, plano in pendentes.items():
-        text += f"🧾 {uid}: {plano.replace('_',' ').title()}\n"
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        text += f"- {uid}: {plano}\n"
+    await update.message.reply_text(text)
 
 async def confirmar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    args = context.args
-    if not args:
+    if not context.args:
         await update.message.reply_text("Use: /confirmar <user_id>")
         return
-    uid = int(args[0])
+    uid = int(context.args[0])
     if uid in pendentes:
         plano = pendentes.pop(uid)
-        await update.message.reply_text(f"✅ Pagamento de {plano.replace('_',' ').title()} confirmado para {uid}.")
+        await update.message.reply_text(f"✅ Pagamento de {plano} confirmado para {uid}.")
     else:
-        await update.message.reply_text("❌ Usuário não encontrado nos pendentes.")
+        await update.message.reply_text("Usuário não encontrado nos pendentes.")
 
 async def negar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    args = context.args
-    if not args:
+    if not context.args:
         await update.message.reply_text("Use: /negar <user_id>")
         return
-    uid = int(args[0])
+    uid = int(context.args[0])
     if uid in pendentes:
         plano = pendentes.pop(uid)
-        await update.message.reply_text(f"❌ Pagamento de {plano.replace('_',' ').title()} negado para {uid}.")
+        await update.message.reply_text(f"❌ Pagamento de {plano} negado para {uid}.")
     else:
-        await update.message.reply_text("❌ Usuário não encontrado nos pendentes.")
+        await update.message.reply_text("Usuário não encontrado nos pendentes.")
 
-# ===================== FASTAPI =====================
+# ================= FASTAPI =================
 app = FastAPI()
-application = Application.builder().token(BOT_TOKEN).build()
+bot_app = Application.builder().token(BOT_TOKEN).build()
 
-# Handlers do bot
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CallbackQueryHandler(button))
-application.add_handler(CommandHandler("pendentes", pendentes_cmd))
-application.add_handler(CommandHandler("confirmar", confirmar))
-application.add_handler(CommandHandler("negar", negar))
+# Registra handlers
+bot_app.add_handler(CommandHandler("start", start))
+bot_app.add_handler(CallbackQueryHandler(button))
+bot_app.add_handler(CommandHandler("pendentes", pendentes_cmd))
+bot_app.add_handler(CommandHandler("confirmar", confirmar))
+bot_app.add_handler(CommandHandler("negar", negar))
 
-# Webhook endpoint
-@app.post("/webhook")
+@app.post(f"/{BOT_TOKEN}")
 async def webhook(req: Request):
     data = await req.json()
-    update = Update.de_json(data, application.bot)
-    await application.update_queue.put(update)
+    update = Update.de_json(data, bot_app.bot)
+    await bot_app.update_queue.put(update)
     return {"ok": True}
 
-# ===================== START DO BOT =====================
 @app.on_event("startup")
-async def on_startup():
-    await application.initialize()
-    await application.start()
-    await application.updater.start_webhook(
-        listen="0.0.0.0",
-        port=int(os.getenv("PORT", 10000)),
-        url_path=BOT_TOKEN,
-    )
-    await application.updater.bot.set_webhook(f"https://SEU_DOMINIO.com/{BOT_TOKEN}")
+async def startup():
+    await bot_app.initialize()
+    await bot_app.start()
+    await bot_app.bot.set_webhook(f"{WEBHOOK_URL}/{BOT_TOKEN}")
 
 @app.on_event("shutdown")
-async def on_shutdown():
-    await application.updater.stop()
-    await application.stop()
+async def shutdown():
+    await bot_app.stop()
