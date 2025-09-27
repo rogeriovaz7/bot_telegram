@@ -1,11 +1,12 @@
 python-telegram-bot==20.6
 qrcode
 pysqlite3-binary
-openai
 Pillow
 requests
 fastapi==0.117.1
 uvicorn==0.37.0
 requests
+openai==1.109.1
+
 
 
