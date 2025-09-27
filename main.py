@@ -2,6 +2,7 @@
 import os
 import sqlite3
 import logging
+from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -11,23 +12,19 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from fastapi import FastAPI
-import uvicorn
-import threading
+import asyncio
 
 # =========================
 # CONFIGURAÇÕES
 # =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
 PAYPAL_USER = os.getenv("PAYPAL_USER")
 RENDER_URL = os.getenv("RENDER_URL")
 MEU_TELEGRAM = os.getenv("MEU_TELEGRAM")  # teu username sem @
 
 if not all([BOT_TOKEN, ADMIN_ID, PAYPAL_USER, RENDER_URL, MEU_TELEGRAM]):
     raise RuntimeError("⚠️ Configure BOT_TOKEN, ADMIN_ID, PAYPAL_USER, RENDER_URL e MEU_TELEGRAM")
-
-ADMIN_ID = int(ADMIN_ID)
 
 # =========================
 # LOGGING
@@ -41,7 +38,7 @@ app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {"status": "Bot está rodando 🚀"}
+    return {"status": "Bot ativo com webhook 🚀"}
 
 # =========================
 # BANCO DE DADOS
@@ -51,7 +48,6 @@ DB_FILE = "pedidos.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Tabela de pedidos
     c.execute("""
         CREATE TABLE IF NOT EXISTS pedidos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,7 +58,6 @@ def init_db():
             status TEXT
         )
     """)
-    # Tabela de usuários que já viram a intro
     c.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             user_id INTEGER PRIMARY KEY
@@ -117,6 +112,11 @@ produtos = {
     "2": {"nome": "Plano Trimestral", "preco": 25, "descricao": "Acesso IPTV 90 dias", "imagem": "banners/intro.png"},
     "3": {"nome": "Plano Anual", "preco": 80, "descricao": "Acesso IPTV 365 dias", "imagem": "banners/intro.png"},
 }
+
+# =========================
+# INICIALIZAÇÃO DO BOT
+# =========================
+application = Application.builder().token(BOT_TOKEN).build()
 
 # =========================
 # FUNÇÕES BOT
@@ -178,7 +178,6 @@ async def receber_comprovativo(update: Update, context: ContextTypes.DEFAULT_TYP
 
         caption = f"📩 Comprovativo de {user.full_name} (@{user.username}, ID: {user.id})"
 
-        # Botões inline para ADMIN aprovar/neg
         keyboard = [
             [
                 InlineKeyboardButton("✅ Confirmar", callback_data=f"confirmar_{user.id}"),
@@ -196,9 +195,6 @@ async def receber_comprovativo(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await update.message.reply_text("⚠️ Envie o comprovativo como foto ou documento.")
 
-# =========================
-# CALLBACK BOTÕES COMPROVATIVO
-# =========================
 async def callback_comprovativo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -217,8 +213,7 @@ async def callback_comprovativo(update: Update, context: ContextTypes.DEFAULT_TY
     elif action == "negar":
         atualizar_status(user_id, "negado")
         await context.bot.send_message(user_id,
-            "⚠️ Seu comprovativo foi analisado e *não foi aprovado*.\n\n"
-            "➡️ Verifique se o pagamento foi realizado corretamente e envie novamente o comprovativo válido."
+            "⚠️ Seu comprovativo não foi aprovado. Envie novamente um comprovativo válido."
         )
         await query.message.edit_caption(query.message.caption + "\n\n❌ Pagamento negado pelo ADMIN")
 
@@ -251,8 +246,7 @@ async def negar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = int(context.args[0])
         atualizar_status(user_id, "negado")
         await context.bot.send_message(user_id,
-            "⚠️ Seu comprovativo foi analisado e *não foi aprovado*.\n\n"
-            "➡️ Verifique se o pagamento foi realizado corretamente e envie novamente o comprovativo válido."
+            "⚠️ Seu comprovativo não foi aprovado. Envie novamente um comprovativo válido."
         )
         await update.message.reply_text(f"❌ Pagamento negado para usuário {user_id}")
     except Exception as e:
@@ -262,38 +256,45 @@ async def pendentes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Não autorizado.")
         return
-    
     pedidos = listar_pendentes()
     if not pedidos:
         await update.message.reply_text("✅ Não há pedidos pendentes.")
         return
-
     resposta = "📋 *Pedidos pendentes:*\n\n"
     for pid, user_id, produto, preco in pedidos:
         resposta += f"🆔 Pedido {pid} | 👤 User {user_id}\n📦 {produto} - {preco}€\n\n"
-
     await update.message.reply_text(resposta, parse_mode="Markdown")
 
 # =========================
-# MAIN DO TELEGRAM BOT
+# HANDLERS
 # =========================
-def run_bot():
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(comprar, pattern="^comprar_"))
-    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, receber_comprovativo))
-    application.add_handler(CommandHandler("confirmar", confirmar))
-    application.add_handler(CommandHandler("negar", negar))
-    application.add_handler(CommandHandler("pendentes", pendentes))
-    application.add_handler(CallbackQueryHandler(callback_comprovativo, pattern="^(confirmar|negar)_"))
-
-    application.run_polling()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CallbackQueryHandler(comprar, pattern="^comprar_"))
+application.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, receber_comprovativo))
+application.add_handler(CallbackQueryHandler(callback_comprovativo, pattern="^(confirmar|negar)_"))
+application.add_handler(CommandHandler("confirmar", confirmar))
+application.add_handler(CommandHandler("negar", negar))
+application.add_handler(CommandHandler("pendentes", pendentes))
 
 # =========================
-# INICIAR
+# WEBHOOK FASTAPI
 # =========================
-if __name__ == "__main__":
+@app.post("/webhook")
+async def webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.update_queue.put(update)
+    return {"status": "ok"}
+
+@app.on_event("startup")
+async def on_startup():
     init_db()
-    threading.Thread(target=run_bot, daemon=True).start()
-    uvicorn.run(app, host="0.0.0.0", port=10000)
+    await application.initialize()
+    await application.start()
+    webhook_url = f"https://{RENDER_URL}/webhook"
+    await application.bot.set_webhook(webhook_url)
+    print(f"🌐 Webhook configurado: {webhook_url}")
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await application.stop()
