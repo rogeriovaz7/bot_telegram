@@ -22,9 +22,10 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PAYPAL_USER = os.getenv("PAYPAL_USER")
 RENDER_URL = os.getenv("RENDER_URL")
+MEU_TELEGRAM = os.getenv("MEU_TELEGRAM")  # seu usuário Telegram sem @
 
-if not TOKEN or not ADMIN_ID or not OPENAI_API_KEY or not PAYPAL_USER or not RENDER_URL:
-    raise RuntimeError("⚠️ Configure BOT_TOKEN, ADMIN_ID, OPENAI_API_KEY, PAYPAL_USER, RENDER_URL")
+if not TOKEN or not ADMIN_ID or not OPENAI_API_KEY or not PAYPAL_USER or not RENDER_URL or not MEU_TELEGRAM:
+    raise RuntimeError("⚠️ Configure BOT_TOKEN, ADMIN_ID, OPENAI_API_KEY, PAYPAL_USER, RENDER_URL e MEU_TELEGRAM")
 
 DB_FILE = "pedidos.db"
 
@@ -198,13 +199,16 @@ async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await avisar_admin(produto["nome"], produto["preco"], user_name, user_id)
 
     paypal_link = criar_link_paypal(produto["preco"])
+    
     mensagem = (
         f"✅ Você escolheu: *{produto['nome']}* - {produto['preco']}€\n\n"
         f"📺 {produto['descricao']}\n\n"
         f"💳 Pague com PayPal: {paypal_link}\n\n"
-        f"📩 Após realizar o pagamento, envie o comprovativo aqui no Telegram.\n"
+        f"📩 Após realizar o pagamento, envie o comprovativo clicando aqui: "
+        f"[@{MEU_TELEGRAM}](https://t.me/{MEU_TELEGRAM})\n"
         f"⏳ Seu pedido será validado e liberado em breve."
     )
+
     await query.message.reply_photo(
         open(produto["imagem"], "rb"),
         caption=mensagem,
