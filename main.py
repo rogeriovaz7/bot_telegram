@@ -1,186 +1,156 @@
-
 # main.py
 import os
-import sqlite3
 import asyncio
-from fastapi import FastAPI, Request
+import sqlite3
+from fastapi import FastAPI
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes,
-    MessageHandler, filters
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
 )
 import openai
 
-# ---------------------------
-# CONFIGURAÇÃO
-# ---------------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = os.environ.get("ADMIN_ID")
-MEU_TELEGRAM = os.environ.get("MEU_TELEGRAM")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-PAYPAL_LINK = os.environ.get("PAYPAL_LINK", "https://paypal.me/seu_usuario/valor")
-
-if not all([BOT_TOKEN, ADMIN_ID, MEU_TELEGRAM, WEBHOOK_URL, OPENAI_API_KEY]):
-    raise RuntimeError("Configure BOT_TOKEN, ADMIN_ID, MEU_TELEGRAM, WEBHOOK_URL e OPENAI_API_KEY")
+# ================================
+# Configurações
+# ================================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+PAYPAL_LINK = os.getenv("PAYPAL_LINK")  # Link para pagamento
+PORT = int(os.getenv("PORT", 10000))
 
 openai.api_key = OPENAI_API_KEY
 
-# ---------------------------
-# Inicializa FastAPI
-# ---------------------------
+# ================================
+# Banco de dados SQLite
+# ================================
+DB_FILE = "comprovativos.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS pagamentos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        username TEXT,
+        link TEXT NOT NULL,
+        status TEXT DEFAULT 'pendente'
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+def add_comprovativo(user_id, username, link):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO pagamentos (user_id, username, link)
+    VALUES (?, ?, ?)
+    """, (user_id, username, link))
+    conn.commit()
+    conn.close()
+
+def check_comprovativo(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM pagamentos WHERE user_id=? AND status='pendente'", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result
+
+# ================================
+# FastAPI
+# ================================
 app = FastAPI()
 
-# ---------------------------
-# Banco de dados SQLite
-# ---------------------------
-conn = sqlite3.connect("bot_data.db", check_same_thread=False)
-cursor = conn.cursor()
+@app.get("/")
+async def root():
+    return {"status": "Bot com IA e pagamentos está online!"}
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    last_command TEXT
-)
-""")
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS payments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    status TEXT,
-    link TEXT
-)
-""")
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS ia_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    message TEXT,
-    response TEXT
-)
-""")
-conn.commit()
-
-# ---------------------------
-# Funções auxiliares
-# ---------------------------
-async def log_to_admin(message: str):
-    """Envia logs para o ADMIN"""
-    try:
-        await bot_app.bot.send_message(chat_id=int(ADMIN_ID), text=message)
-    except Exception as e:
-        print("Falha ao enviar log:", e)
-
-def save_user(user_id, username):
-    cursor.execute("INSERT OR IGNORE INTO users(user_id, username) VALUES (?, ?)", (user_id, username))
-    conn.commit()
-
-# ---------------------------
-# Handlers do Bot
-# ---------------------------
+# ================================
+# Telegram Handlers
+# ================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    username = update.effective_user.username
-    save_user(user_id, username)
-    await update.message.reply_text(
-        "Olá! Bot ativo ✅\nUse /help para ver os comandos disponíveis."
+    text = (
+        "Olá! Eu sou um bot com IA.\n"
+        "Envie-me uma mensagem para responder.\n\n"
+        f"Para carregar saldo via PayPal, use: {PAYPAL_LINK}\n"
+        "Depois de enviar o comprovativo, envie-me o link para validar o pagamento."
     )
+    await update.message.reply_text(text)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Comandos disponíveis:\n"
+    text = (
+        "Comandos:\n"
         "/start - iniciar bot\n"
-        "/help - ajuda\n"
-        "/comprovativo - enviar comprovativo\n"
-        "/pagamento - gerar link PayPal\n"
-        "/ia <mensagem> - conversar com IA\n"
-        "/history - ver histórico de IA"
+        "/help - ajuda\n\n"
+        "Envie qualquer mensagem e eu responderei com IA.\n"
+        f"Para pagamento PayPal: {PAYPAL_LINK}"
     )
+    await update.message.reply_text(text)
 
-async def enviar_telegram(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"Envie o comprovativo para: {MEU_TELEGRAM}"
-    )
-
-async def pagamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    cursor.execute("INSERT INTO payments(user_id, status, link) VALUES (?, ?, ?)",
-                   (user_id, "pending", PAYPAL_LINK))
-    conn.commit()
-    await update.message.reply_text(f"Faça o pagamento usando este link: {PAYPAL_LINK}")
-    await log_to_admin(f"Novo pagamento pendente do usuário {user_id} ({update.effective_user.username})")
-
-async def chat_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_msg = " ".join(context.args)
-    if not user_msg:
-        await update.message.reply_text("Escreva algo após /ia para conversar com a IA.")
-        return
+async def chatgpt_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_message = update.message.text
     try:
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": user_msg}],
-            max_tokens=300
+            messages=[{"role": "user", "content": user_message}],
+            temperature=0.7,
+            max_tokens=500
         )
-        reply_text = response['choices'][0]['message']['content']
-        await update.message.reply_text(reply_text)
-
-        # Salva histórico no SQLite
-        cursor.execute("INSERT INTO ia_history(user_id, message, response) VALUES (?, ?, ?)",
-                       (user_id, user_msg, reply_text))
-        conn.commit()
+        answer = response['choices'][0]['message']['content'].strip()
     except Exception as e:
-        await update.message.reply_text(f"Erro na IA: {e}")
+        answer = "Erro ao processar a mensagem. Tente novamente."
+        print("OpenAI Error:", e)
+    
+    await update.message.reply_text(answer)
 
-async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    cursor.execute("SELECT message, response FROM ia_history WHERE user_id=? ORDER BY id DESC LIMIT 10", (user_id,))
-    rows = cursor.fetchall()
-    if not rows:
-        await update.message.reply_text("Nenhum histórico encontrado.")
-        return
-    history_text = "\n\n".join([f"Q: {msg}\nA: {resp}" for msg, resp in rows])
-    await update.message.reply_text(f"Últimas 10 interações:\n\n{history_text}")
+async def comprovativo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    username = update.message.from_user.username or ""
+    user_message = update.message.text
 
-# ---------------------------
-# Cria aplicação do Telegram
-# ---------------------------
-bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CommandHandler("help", help_command))
-bot_app.add_handler(CommandHandler("comprovativo", enviar_telegram))
-bot_app.add_handler(CommandHandler("pagamento", pagamento))
-bot_app.add_handler(CommandHandler("ia", chat_ia))
-bot_app.add_handler(CommandHandler("history", history))
+    if "http" in user_message:  # Se for um link
+        existing = check_comprovativo(user_id)
+        if existing:
+            await update.message.reply_text(
+                "Você já enviou um comprovativo pendente. Aguarde validação."
+            )
+        else:
+            add_comprovativo(user_id, username, user_message)
+            await update.message.reply_text(
+                "Recebi seu comprovativo! Vamos validar e creditar o saldo em breve."
+            )
+    else:
+        await chatgpt_response(update, context)
 
-# ---------------------------
-# FastAPI endpoint para webhook
-# ---------------------------
-@app.post(f"/{BOT_TOKEN}")
-async def telegram_webhook(request: Request):
-    update = Update.de_json(await request.json(), bot_app.bot)
-    await bot_app.update_queue.put(update)
-    return {"ok": True}
+# ================================
+# Criação do Bot Telegram
+# ================================
+async def start_bot():
+    application = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .concurrent_updates(True)
+        .build()
+    )
 
-# ---------------------------
-# Configura webhook
-# ---------------------------
-async def set_webhook():
-    await bot_app.bot.set_webhook(WEBHOOK_URL)
-    print("Webhook configurado:", WEBHOOK_URL)
-    await log_to_admin(f"Webhook configurado: {WEBHOOK_URL}")
+    # Handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, comprovativo_handler))
 
-# ---------------------------
-# Startup e shutdown
-# ---------------------------
+    # Inicia polling
+    await application.run_polling()
+
+# ================================
+# FastAPI startup
+# ================================
 @app.on_event("startup")
 async def startup_event():
-    await set_webhook()
-    asyncio.create_task(bot_app.run_polling())
-    await log_to_admin("Bot iniciado com sucesso ✅")
+    init_db()
+    asyncio.create_task(start_bot())
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    await bot_app.bot.delete_webhook()
-    await log_to_admin("Bot desligado ⚠️")
