@@ -1,9 +1,7 @@
-
 import json
 import sqlite3
 import os
 import asyncio
-import requests
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -14,20 +12,23 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from openai import OpenAI
 
 # =========================
 # CONFIGURAÇÃO
 # =========================
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-HF_TOKEN = os.getenv("HF_TOKEN")  # Token HuggingFace gratuito
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PAYPAL_USER = os.getenv("PAYPAL_USER")
 RENDER_URL = os.getenv("RENDER_URL")
 
-if not TOKEN or not ADMIN_ID or not HF_TOKEN or not PAYPAL_USER or not RENDER_URL:
-    raise RuntimeError("⚠️ Configure BOT_TOKEN, ADMIN_ID, HF_TOKEN, PAYPAL_USER, RENDER_URL")
+if not TOKEN or not ADMIN_ID or not OPENAI_API_KEY or not PAYPAL_USER or not RENDER_URL:
+    raise RuntimeError("⚠️ Configure BOT_TOKEN, ADMIN_ID, OPENAI_API_KEY, PAYPAL_USER, RENDER_URL")
 
 DB_FILE = "pedidos.db"
+
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =========================
 # BANCO DE DADOS
@@ -68,6 +69,58 @@ with open("produtos.json", "r", encoding="utf-8") as f:
     produtos = json.load(f)
 
 # =========================
+# HISTÓRICO E IA CHATGPT
+# =========================
+def salvar_historico(user_id, role, mensagem):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO historico (user_id, role, mensagem) VALUES (?, ?, ?)",
+        (user_id, role, mensagem),
+    )
+    conn.commit()
+    conn.close()
+
+def resumir_historico(user_id, max_msgs=10):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT role, mensagem FROM historico WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
+        (user_id, max_msgs)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    rows = rows[::-1]
+    return [{"role": r, "content": m} for r, m in rows]
+
+def obter_resposta_chatgpt(pergunta: str, user_id: int) -> str:
+    """
+    Responde usando ChatGPT GPT-3.5
+    """
+    lista_produtos = "\n".join(
+        [f"- {k}: {p['nome']} ({p['preco']}€) → {p['descricao']}" for k, p in produtos.items()]
+    )
+    historico = resumir_historico(user_id)
+    
+    messages = [{"role": "system", "content": f"Você é um assistente simpático da Loja IPTV Futurista. Produtos:\n{lista_produtos}"}]
+    for h in historico:
+        messages.append({"role": h["role"], "content": h["content"]})
+    messages.append({"role": "user", "content": pergunta})
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=messages
+        )
+        resposta = resp.choices[0].message.content
+    except Exception as e:
+        resposta = f"🤖 Ocorreu um erro ao contactar a IA: {e}"
+
+    salvar_historico(user_id, "user", pergunta)
+    salvar_historico(user_id, "assistant", resposta)
+    return resposta
+
+# =========================
 # FUNÇÕES DE LOJA
 # =========================
 def registrar_pedido(user_id, produto, preco, link):
@@ -94,7 +147,7 @@ async def avisar_admin(produto, preco, user_name, user_id):
     await application.bot.send_message(chat_id=ADMIN_ID, text=msg)
 
 # =========================
-# HANDLERS DA LOJA
+# HANDLERS TELEGRAM
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🚀 Iniciar Loja", callback_data="menu")]]
@@ -167,68 +220,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("comprar_"):
         await comprar(update, context)
 
-# =========================
-# HISTÓRICO E IA (MPT-7B-StoryWriter grátis)
-# =========================
-def salvar_historico(user_id, role, mensagem):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO historico (user_id, role, mensagem) VALUES (?, ?, ?)",
-        (user_id, role, mensagem),
-    )
-    conn.commit()
-    conn.close()
-
-def resumir_historico(user_id, max_msgs=10):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT role, mensagem FROM historico WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
-        (user_id, max_msgs)
-    )
-    rows = cursor.fetchall()
-    conn.close()
-    rows = rows[::-1]
-    return [{"role": r, "content": m} for r, m in rows]
-
-def obter_resposta_ia_gratis(pergunta: str, user_id: int, tom="simpatico") -> str:
-    """
-    IA grátis usando HuggingFace MPT-7B-StoryWriter
-    """
-    lista_produtos = "\n".join(
-        [f"- {k}: {p['nome']} ({p['preco']}€) → {p['descricao']}" for k, p in produtos.items()]
-    )
-    historico = resumir_historico(user_id)
-    
-    prompt = f"Você é um assistente da Loja IPTV Futurista. Responda de forma {tom}.\n\n"
-    prompt += "Produtos disponíveis:\n" + lista_produtos + "\n\n"
-    prompt += "Histórico:\n"
-    for m in historico:
-        prompt += f"{m['role']}: {m['content']}\n"
-    prompt += f"User: {pergunta}"
-
-    url = "https://api-inference.huggingface.co/models/mosaicml/mpt-7b-storywriter"
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-
-    try:
-        resp = requests.post(url, headers=headers, json={"inputs": prompt}, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, list) and "generated_text" in data[0]:
-            resposta = data[0]["generated_text"]
-        else:
-            resposta = "🤖 Não consegui gerar resposta."
-        salvar_historico(user_id, "user", pergunta)
-        salvar_historico(user_id, "assistant", resposta)
-        return resposta
-    except Exception as e:
-        return f"🤖 Ocorreu um erro ao contactar a IA: {e}"
-
-async def responder_ia_avancado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def responder_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     pergunta = update.message.text
-    resposta = obter_resposta_ia_gratis(pergunta, user_id)
+    resposta = obter_resposta_chatgpt(pergunta, user_id)
     keyboard = []
     for key, p in produtos.items():
         if str(p["preco"]) in resposta or p["nome"].lower() in resposta.lower():
@@ -244,7 +239,7 @@ application = Application.builder().token(TOKEN).updater(None).build()
 
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(callback_router))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder_ia_avancado))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder_ia))
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -255,7 +250,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 def home():
-    return {"status": "🤖 Bot IPTV Futurista com IA MPT-7B grátis ativo!"}
+    return {"status": "🤖 Bot IPTV Futurista com ChatGPT ativo!"}
 
 async def start_webhook():
     webhook_url = f"https://{RENDER_URL}/webhook"
