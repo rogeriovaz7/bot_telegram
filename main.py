@@ -1,211 +1,186 @@
+
+# main.py
 import os
 import sqlite3
+import asyncio
 from fastapi import FastAPI, Request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters
+    ApplicationBuilder, CommandHandler, ContextTypes,
+    MessageHandler, filters
 )
+import openai
 
-# -----------------------------
+# ---------------------------
 # CONFIGURAÇÃO
-# -----------------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "SEU_BOT_TOKEN_AQUI")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
-MEU_TELEGRAM = os.environ.get("MEU_TELEGRAM", "@seu_usuario")
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://SEU_DOMINIO.onrender.com/webhook")
-DB_PATH = "comprovativos.db"
+# ---------------------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_ID = os.environ.get("ADMIN_ID")
+MEU_TELEGRAM = os.environ.get("MEU_TELEGRAM")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+PAYPAL_LINK = os.environ.get("PAYPAL_LINK", "https://paypal.me/seu_usuario/valor")
 
-if not BOT_TOKEN or not ADMIN_ID or not MEU_TELEGRAM or not WEBHOOK_URL:
-    raise RuntimeError("Configure BOT_TOKEN, ADMIN_ID, MEU_TELEGRAM e WEBHOOK_URL")
+if not all([BOT_TOKEN, ADMIN_ID, MEU_TELEGRAM, WEBHOOK_URL, OPENAI_API_KEY]):
+    raise RuntimeError("Configure BOT_TOKEN, ADMIN_ID, MEU_TELEGRAM, WEBHOOK_URL e OPENAI_API_KEY")
 
-# -----------------------------
-# FASTAPI
-# -----------------------------
+openai.api_key = OPENAI_API_KEY
+
+# ---------------------------
+# Inicializa FastAPI
+# ---------------------------
 app = FastAPI()
 
-# -----------------------------
-# BOT TELEGRAM
-# -----------------------------
-bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
+# ---------------------------
+# Banco de dados SQLite
+# ---------------------------
+conn = sqlite3.connect("bot_data.db", check_same_thread=False)
+cursor = conn.cursor()
 
-# -----------------------------
-# BANCO DE DADOS
-# -----------------------------
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS comprovativos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            username TEXT,
-            fullname TEXT,
-            file_id TEXT,
-            file_type TEXT,
-            status TEXT DEFAULT 'pendente'
-        )
-    """)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    last_command TEXT
+)
+""")
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    status TEXT,
+    link TEXT
+)
+""")
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS ia_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    message TEXT,
+    response TEXT
+)
+""")
+conn.commit()
+
+# ---------------------------
+# Funções auxiliares
+# ---------------------------
+async def log_to_admin(message: str):
+    """Envia logs para o ADMIN"""
+    try:
+        await bot_app.bot.send_message(chat_id=int(ADMIN_ID), text=message)
+    except Exception as e:
+        print("Falha ao enviar log:", e)
+
+def save_user(user_id, username):
+    cursor.execute("INSERT OR IGNORE INTO users(user_id, username) VALUES (?, ?)", (user_id, username))
     conn.commit()
-    conn.close()
 
-init_db()
-
-# -----------------------------
-# HANDLERS
-# -----------------------------
+# ---------------------------
+# Handlers do Bot
+# ---------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    username = update.effective_user.username
+    save_user(user_id, username)
     await update.message.reply_text(
-        f"Olá {update.effective_user.first_name}! 👋\n"
-        f"Use /enviar_comprovativo para enviar seu comprovativo."
+        "Olá! Bot ativo ✅\nUse /help para ver os comandos disponíveis."
     )
 
-async def enviar_comprovativo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"Envie sua foto ou documento de comprovativo.\n"
-        f"O admin {MEU_TELEGRAM} será notificado."
+        "Comandos disponíveis:\n"
+        "/start - iniciar bot\n"
+        "/help - ajuda\n"
+        "/comprovativo - enviar comprovativo\n"
+        "/pagamento - gerar link PayPal\n"
+        "/ia <mensagem> - conversar com IA\n"
+        "/history - ver histórico de IA"
     )
 
-async def receber_comprovativo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+async def enviar_telegram(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"Envie o comprovativo para: {MEU_TELEGRAM}"
+    )
 
-    # Detecta tipo
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        file_type = "photo"
-    elif update.message.document:
-        file_id = update.message.document.file_id
-        file_type = "document"
-    else:
-        await update.message.reply_text("⚠️ Envie apenas foto ou documento!")
-        return
-
-    # Salva no DB
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO comprovativos (user_id, username, fullname, file_id, file_type)
-        VALUES (?, ?, ?, ?, ?)
-    """, (user.id, user.username, user.full_name, file_id, file_type))
+async def pagamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    cursor.execute("INSERT INTO payments(user_id, status, link) VALUES (?, ?, ?)",
+                   (user_id, "pending", PAYPAL_LINK))
     conn.commit()
-    comprovativo_id = cursor.lastrowid
-    conn.close()
+    await update.message.reply_text(f"Faça o pagamento usando este link: {PAYPAL_LINK}")
+    await log_to_admin(f"Novo pagamento pendente do usuário {user_id} ({update.effective_user.username})")
 
-    await update.message.reply_text("✅ Comprovativo enviado! Aguarde aprovação do admin.")
-
-# -----------------------------
-# LISTAR PENDENTES (ADMIN)
-# -----------------------------
-async def listar_pendentes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Apenas o admin pode usar este comando.")
+async def chat_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_msg = " ".join(context.args)
+    if not user_msg:
+        await update.message.reply_text("Escreva algo após /ia para conversar com a IA.")
         return
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": user_msg}],
+            max_tokens=300
+        )
+        reply_text = response['choices'][0]['message']['content']
+        await update.message.reply_text(reply_text)
 
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, fullname, username, file_type, file_id FROM comprovativos WHERE status='pendente'")
+        # Salva histórico no SQLite
+        cursor.execute("INSERT INTO ia_history(user_id, message, response) VALUES (?, ?, ?)",
+                       (user_id, user_msg, reply_text))
+        conn.commit()
+    except Exception as e:
+        await update.message.reply_text(f"Erro na IA: {e}")
+
+async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    cursor.execute("SELECT message, response FROM ia_history WHERE user_id=? ORDER BY id DESC LIMIT 10", (user_id,))
     rows = cursor.fetchall()
-    conn.close()
-
     if not rows:
-        await update.message.reply_text("✅ Não há comprovativos pendentes.")
+        await update.message.reply_text("Nenhum histórico encontrado.")
         return
+    history_text = "\n\n".join([f"Q: {msg}\nA: {resp}" for msg, resp in rows])
+    await update.message.reply_text(f"Últimas 10 interações:\n\n{history_text}")
 
-    for row in rows:
-        cid, fullname, username, ftype, fid = row
-        buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Aprovar", callback_data=f"aprovar:{cid}"),
-             InlineKeyboardButton("❌ Rejeitar", callback_data=f"rejeitar:{cid}")]
-        ])
-        text = f"📌 {fullname} (@{username})\nTipo: {ftype}"
-        if ftype == "photo":
-            await context.bot.send_photo(chat_id=ADMIN_ID, photo=fid, caption=text, reply_markup=buttons)
-        else:
-            await context.bot.send_document(chat_id=ADMIN_ID, document=fid, caption=text, reply_markup=buttons)
-
-# -----------------------------
-# APROVAR/REJEITAR
-# -----------------------------
-async def aprovar_rejeitar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    action, comprovativo_id = data.split(":")
-    comprovativo_id = int(comprovativo_id)
-
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM comprovativos WHERE id=?", (comprovativo_id,))
-    row = cursor.fetchone()
-    if not row:
-        await query.edit_message_caption(caption="❌ Comprovativo não encontrado.")
-        conn.close()
-        return
-
-    user_id = row[0]
-    status_text = "Aprovado ✅" if action == "aprovar" else "Rejeitado ❌"
-    cursor.execute("UPDATE comprovativos SET status=? WHERE id=?", (status_text, comprovativo_id))
-    conn.commit()
-    conn.close()
-
-    await query.edit_message_caption(caption=f"{status_text} por {update.effective_user.full_name}")
-    await context.bot.send_message(chat_id=user_id, text=f"Seu comprovativo foi {status_text.lower()}!")
-
-# -----------------------------
-# HISTÓRICO (ADMIN)
-# -----------------------------
-async def historico(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Apenas o admin pode usar este comando.")
-        return
-
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, fullname, username, status FROM comprovativos ORDER BY id DESC LIMIT 20")
-    rows = cursor.fetchall()
-    conn.close()
-
-    if not rows:
-        await update.message.reply_text("✅ Nenhum comprovativo encontrado.")
-        return
-
-    text = "📄 Últimos comprovativos:\n"
-    for cid, fullname, username, status in rows:
-        text += f"#{cid} {fullname} (@{username}) → {status}\n"
-    await update.message.reply_text(text)
-
-# -----------------------------
-# ADICIONA HANDLERS
-# -----------------------------
+# ---------------------------
+# Cria aplicação do Telegram
+# ---------------------------
+bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
 bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CommandHandler("enviar_comprovativo", enviar_comprovativo))
-bot_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, receber_comprovativo))
-bot_app.add_handler(CommandHandler("pendentes", listar_pendentes))
-bot_app.add_handler(CommandHandler("historico", historico))
-bot_app.add_handler(CallbackQueryHandler(aprovar_rejeitar, pattern="^(aprovar|rejeitar):"))
+bot_app.add_handler(CommandHandler("help", help_command))
+bot_app.add_handler(CommandHandler("comprovativo", enviar_telegram))
+bot_app.add_handler(CommandHandler("pagamento", pagamento))
+bot_app.add_handler(CommandHandler("ia", chat_ia))
+bot_app.add_handler(CommandHandler("history", history))
 
-# -----------------------------
-# ENDPOINT DO WEBHOOK
-# -----------------------------
-@app.post(WEBHOOK_PATH)
-async def telegram_webhook(req: Request):
-    data = await req.json()
-    update = Update.de_json(data, bot_app.bot)
+# ---------------------------
+# FastAPI endpoint para webhook
+# ---------------------------
+@app.post(f"/{BOT_TOKEN}")
+async def telegram_webhook(request: Request):
+    update = Update.de_json(await request.json(), bot_app.bot)
     await bot_app.update_queue.put(update)
-    return {"status": "ok"}
+    return {"ok": True}
 
-# -----------------------------
-# STARTUP / SHUTDOWN
-# -----------------------------
+# ---------------------------
+# Configura webhook
+# ---------------------------
+async def set_webhook():
+    await bot_app.bot.set_webhook(WEBHOOK_URL)
+    print("Webhook configurado:", WEBHOOK_URL)
+    await log_to_admin(f"Webhook configurado: {WEBHOOK_URL}")
+
+# ---------------------------
+# Startup e shutdown
+# ---------------------------
 @app.on_event("startup")
 async def startup_event():
-    await bot_app.initialize()
-    await bot_app.start()
-    await bot_app.bot.set_webhook(WEBHOOK_URL)
+    await set_webhook()
+    asyncio.create_task(bot_app.run_polling())
+    await log_to_admin("Bot iniciado com sucesso ✅")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    await bot_app.stop()
-    await bot_app.shutdown()
-
+    await bot_app.bot.delete_webhook()
+    await log_to_admin("Bot desligado ⚠️")
