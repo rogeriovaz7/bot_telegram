@@ -1,3 +1,4 @@
+
 import json
 import sqlite3
 import os
@@ -167,7 +168,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await comprar(update, context)
 
 # =========================
-# HISTÓRICO E IA (Falcon-7B-Instruct grátis)
+# HISTÓRICO E IA (MPT-7B-StoryWriter grátis)
 # =========================
 def salvar_historico(user_id, role, mensagem):
     conn = sqlite3.connect(DB_FILE)
@@ -193,7 +194,7 @@ def resumir_historico(user_id, max_msgs=10):
 
 def obter_resposta_ia_gratis(pergunta: str, user_id: int, tom="simpatico") -> str:
     """
-    IA grátis usando HuggingFace Falcon-7B-Instruct
+    IA grátis usando HuggingFace MPT-7B-StoryWriter
     """
     lista_produtos = "\n".join(
         [f"- {k}: {p['nome']} ({p['preco']}€) → {p['descricao']}" for k, p in produtos.items()]
@@ -207,7 +208,7 @@ def obter_resposta_ia_gratis(pergunta: str, user_id: int, tom="simpatico") -> st
         prompt += f"{m['role']}: {m['content']}\n"
     prompt += f"User: {pergunta}"
 
-    url = "https://api-inference.huggingface.co/models/tiiuae/falcon-7b-instruct"
+    url = "https://api-inference.huggingface.co/models/mosaicml/mpt-7b-storywriter"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 
     try:
@@ -254,7 +255,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 def home():
-    return {"status": "🤖 Bot IPTV Futurista com IA Falcon-7B grátis ativo!"}
+    return {"status": "🤖 Bot IPTV Futurista com IA MPT-7B grátis ativo!"}
 
 async def start_webhook():
     webhook_url = f"https://{RENDER_URL}/webhook"
