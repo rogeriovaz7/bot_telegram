@@ -28,7 +28,6 @@ if not TOKEN or not ADMIN_ID or not OPENAI_API_KEY or not PAYPAL_USER or not REN
     raise RuntimeError("⚠️ Configure BOT_TOKEN, ADMIN_ID, OPENAI_API_KEY, PAYPAL_USER, RENDER_URL e MEU_TELEGRAM")
 
 DB_FILE = "pedidos.db"
-
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =========================
@@ -36,7 +35,6 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # =========================
 conn = sqlite3.connect(DB_FILE)
 cursor = conn.cursor()
-
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS pedidos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,13 +45,11 @@ CREATE TABLE IF NOT EXISTS pedidos (
     link TEXT
 )
 """)
-
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS usuarios (
     user_id INTEGER PRIMARY KEY
 )
 """)
-
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS historico (
     user_id INTEGER,
@@ -62,7 +58,6 @@ CREATE TABLE IF NOT EXISTS historico (
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 """)
-
 conn.commit()
 conn.close()
 
@@ -95,9 +90,6 @@ def resumir_historico(user_id, max_msgs=10):
     return [{"role": r, "content": m} for r, m in rows]
 
 def obter_resposta_chatgpt(pergunta: str, user_id: int) -> str:
-    """
-    Responde usando ChatGPT GPT-3.5
-    """
     lista_produtos = "\n".join(
         [f"- {k}: {p['nome']} ({p['preco']}€) → {p['descricao']}" for k, p in produtos.items()]
     )
@@ -153,12 +145,29 @@ async def avisar_admin(produto, preco, user_name, user_id):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🚀 Iniciar Loja", callback_data="menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "👋 Bem-vindo à *Loja IPTV Futurista*!\n\nClique em *Iniciar Loja* para ver os planos disponíveis.\n\n"
-        "💡 Também pode conversar comigo — sou uma IA que responde dúvidas e ajuda a escolher o plano certo.",
-        parse_mode="Markdown",
-        reply_markup=reply_markup,
-    )
+
+    # envia vídeo inicial da pasta /banners
+    video_path = os.path.join("banners", "intro.mp4")
+    if os.path.exists(video_path):
+        with open(video_path, "rb") as video:
+            await update.message.reply_video(
+                video=video,
+                caption=(
+                    "👋 Bem-vindo à *Loja IPTV Futurista*!\n\n"
+                    "Clique em *Iniciar Loja* para ver os planos disponíveis.\n\n"
+                    "💡 Também pode conversar comigo — sou uma IA que responde dúvidas e ajuda a escolher o plano certo."
+                ),
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+    else:
+        await update.message.reply_text(
+            "👋 Bem-vindo à *Loja IPTV Futurista*!\n\n"
+            "Clique em *Iniciar Loja* para ver os planos disponíveis.\n\n"
+            "💡 Também pode conversar comigo — sou uma IA que responde dúvidas e ajuda a escolher o plano certo.",
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
 
 async def mostrar_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -241,6 +250,7 @@ async def responder_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = FastAPI()
 application = Application.builder().token(TOKEN).updater(None).build()
 
+# Handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(callback_router))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder_ia))
@@ -254,7 +264,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 def home():
-    return {"status": "🤖 Bot IPTV Futurista com ChatGPT ativo!"}
+    return {"status": "🤖 Bot IPTV Futurista com IA ativo!"}
 
 async def start_webhook():
     webhook_url = f"https://{RENDER_URL}/webhook"
@@ -270,3 +280,4 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await application.stop()
+
