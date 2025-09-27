@@ -221,7 +221,6 @@ Histórico:
 User: {pergunta}
 """
    url = "https://api-inference.huggingface.co/models/OpenAssistant/oasst-sft-1-pythia-12b"
-
     try:
         resp = requests.post(url, headers=headers, json={"inputs": prompt}, timeout=30)
         resp.raise_for_status()
@@ -288,5 +287,6 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await application.stop()
+
 
 
