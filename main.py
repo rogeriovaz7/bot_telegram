@@ -1,8 +1,7 @@
-import json
-import sqlite3
+
 import os
-import asyncio
-from fastapi import FastAPI, Request
+import sqlite3
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -12,188 +11,133 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from openai import OpenAI
+from fastapi import FastAPI
+import uvicorn
+import threading
 
 # =========================
-# CONFIGURAÇÃO
+# CONFIGURAÇÕES
 # =========================
-TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = os.getenv("ADMIN_ID")
 PAYPAL_USER = os.getenv("PAYPAL_USER")
 RENDER_URL = os.getenv("RENDER_URL")
-MEU_TELEGRAM = os.getenv("MEU_TELEGRAM")  # seu usuário Telegram sem @
+MEU_TELEGRAM = os.getenv("MEU_TELEGRAM")  # teu username sem @
 
-if not TOKEN or not ADMIN_ID or not OPENAI_API_KEY or not PAYPAL_USER or not RENDER_URL or not MEU_TELEGRAM:
-    raise RuntimeError("⚠️ Configure BOT_TOKEN, ADMIN_ID, OPENAI_API_KEY, PAYPAL_USER, RENDER_URL e MEU_TELEGRAM")
+if not all([BOT_TOKEN, ADMIN_ID, PAYPAL_USER, RENDER_URL, MEU_TELEGRAM]):
+    raise RuntimeError("⚠️ Configure BOT_TOKEN, ADMIN_ID, PAYPAL_USER, RENDER_URL e MEU_TELEGRAM")
 
-DB_FILE = "pedidos.db"
-client = OpenAI(api_key=OPENAI_API_KEY)
+ADMIN_ID = int(ADMIN_ID)
+
+# =========================
+# LOGGING
+# =========================
+logging.basicConfig(level=logging.INFO)
+
+# =========================
+# FASTAPI
+# =========================
+app = FastAPI()
+
+@app.get("/")
+async def root():
+    return {"status": "Bot está rodando 🚀"}
 
 # =========================
 # BANCO DE DADOS
 # =========================
-conn = sqlite3.connect(DB_FILE)
-cursor = conn.cursor()
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS pedidos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    produto TEXT,
-    preco REAL,
-    status TEXT,
-    link TEXT
-)
-""")
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS usuarios (
-    user_id INTEGER PRIMARY KEY
-)
-""")
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS historico (
-    user_id INTEGER,
-    role TEXT,
-    mensagem TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-""")
-conn.commit()
-conn.close()
+DB_FILE = "pedidos.db"
 
-with open("produtos.json", "r", encoding="utf-8") as f:
-    produtos = json.load(f)
-
-# =========================
-# HISTÓRICO E IA CHATGPT
-# =========================
-def salvar_historico(user_id, role, mensagem):
+def init_db():
     conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO historico (user_id, role, mensagem) VALUES (?, ?, ?)",
-        (user_id, role, mensagem),
-    )
+    c = conn.cursor()
+    # Tabela de pedidos
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS pedidos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            produto TEXT,
+            preco REAL,
+            link TEXT,
+            status TEXT
+        )
+    """)
+    # Tabela de usuários que já viram a intro
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            user_id INTEGER PRIMARY KEY
+        )
+    """)
     conn.commit()
     conn.close()
 
-def resumir_historico(user_id, max_msgs=10):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT role, mensagem FROM historico WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
-        (user_id, max_msgs)
-    )
-    rows = cursor.fetchall()
-    conn.close()
-    rows = rows[::-1]
-    return [{"role": r, "content": m} for r, m in rows]
-
-def obter_resposta_chatgpt(pergunta: str, user_id: int) -> str:
-    lista_produtos = "\n".join(
-        [f"- {k}: {p['nome']} ({p['preco']}€) → {p['descricao']}" for k, p in produtos.items()]
-    )
-    historico = resumir_historico(user_id)
-    
-    messages = [{"role": "system", "content": f"Você é um assistente simpático da Loja IPTV Futurista. Produtos:\n{lista_produtos}"}]
-    for h in historico:
-        messages.append({"role": h["role"], "content": h["content"]})
-    messages.append({"role": "user", "content": pergunta})
-
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=messages
-        )
-        resposta = resp.choices[0].message.content
-    except Exception as e:
-        resposta = f"🤖 Ocorreu um erro ao contactar a IA: {e}"
-
-    salvar_historico(user_id, "user", pergunta)
-    salvar_historico(user_id, "assistant", resposta)
-    return resposta
-
-# =========================
-# FUNÇÕES DE LOJA
-# =========================
 def registrar_pedido(user_id, produto, preco, link):
     conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO pedidos (user_id, produto, preco, status, link) VALUES (?, ?, ?, ?, ?)",
-        (user_id, produto, preco, "pendente", link),
-    )
+    c = conn.cursor()
+    c.execute("INSERT INTO pedidos (user_id, produto, preco, link, status) VALUES (?, ?, ?, ?, ?)",
+              (user_id, produto, preco, link, "pendente"))
     conn.commit()
     conn.close()
 
-def criar_link_paypal(preco):
-    return f"https://www.paypal.com/paypalme/{PAYPAL_USER}/{preco}"
+def atualizar_status(user_id, status):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE pedidos SET status=? WHERE user_id=? ORDER BY id DESC LIMIT 1", (status, user_id))
+    conn.commit()
+    conn.close()
 
-async def avisar_admin(produto, preco, user_name, user_id):
-    msg = (
-        f"📦 Novo pedido recebido!\n"
-        f"👤 Usuário: {user_name} ({user_id})\n"
-        f"📺 Produto: {produto}\n"
-        f"💰 Preço: {preco}€\n"
-        f"⏳ Aguardando confirmação de pagamento."
-    )
-    await application.bot.send_message(chat_id=ADMIN_ID, text=msg)
+def listar_pendentes():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT id, user_id, produto, preco FROM pedidos WHERE status='pendente'")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def ja_viu_intro(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM usuarios WHERE user_id=?", (user_id,))
+    visto = c.fetchone() is not None
+    conn.close()
+    return visto
+
+def marcar_intro_vista(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO usuarios (user_id) VALUES (?)", (user_id,))
+    conn.commit()
+    conn.close()
 
 # =========================
-# HANDLERS TELEGRAM
+# PRODUTOS
+# =========================
+produtos = {
+    "1": {"nome": "Plano Mensal", "preco": 10, "descricao": "Acesso IPTV 30 dias", "imagem": "banners/intro.png"},
+    "2": {"nome": "Plano Trimestral", "preco": 25, "descricao": "Acesso IPTV 90 dias", "imagem": "banners/intro.png"},
+    "3": {"nome": "Plano Anual", "preco": 80, "descricao": "Acesso IPTV 365 dias", "imagem": "banners/intro.png"},
+}
+
+# =========================
+# FUNÇÕES BOT
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("🚀 Iniciar Loja", callback_data="menu")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    user_id = update.message.from_user.id
 
-    # envia vídeo inicial da pasta /banners
-    video_path = os.path.join("banners", "intro.mp4")
-    if os.path.exists(video_path):
-        with open(video_path, "rb") as video:
-            await update.message.reply_video(
-                video=video,
-                caption=(
-                    "👋 Bem-vindo à *Loja IPTV Futurista*!\n\n"
-                    "Clique em *Iniciar Loja* para ver os planos disponíveis.\n\n"
-                    "💡 Também pode conversar comigo — sou uma IA que responde dúvidas e ajuda a escolher o plano certo."
-                ),
-                parse_mode="Markdown",
-                reply_markup=reply_markup
-            )
-    else:
-        await update.message.reply_text(
-            "👋 Bem-vindo à *Loja IPTV Futurista*!\n\n"
-            "Clique em *Iniciar Loja* para ver os planos disponíveis.\n\n"
-            "💡 Também pode conversar comigo — sou uma IA que responde dúvidas e ajuda a escolher o plano certo.",
-            parse_mode="Markdown",
-            reply_markup=reply_markup
-        )
+    if not ja_viu_intro(user_id):
+        video_path = "banners/intro.mp4"
+        await update.message.reply_video(open(video_path, "rb"), caption="🎬 Bem-vindo à Loja IPTV Futurista!")
+        marcar_intro_vista(user_id)
 
-async def mostrar_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    # Mostra os planos
     keyboard = [
-        [InlineKeyboardButton(f"📺 {p['nome']} - {p['preco']}€", callback_data=f"produto_{k}")]
-        for k, p in produtos.items()
+        [InlineKeyboardButton(f"{p['nome']} - {p['preco']}€", callback_data=f"comprar_{id}")]
+        for id, p in produtos.items()
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.message.reply_text("🚀 Escolha um dos planos IPTV futuristas abaixo:", reply_markup=reply_markup)
 
-async def mostrar_produto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    item_id = query.data.replace("produto_", "")
-    produto = produtos[item_id]
-    caption = f"📺 *{produto['nome']}*\n💰 {produto['preco']}€\n\nℹ️ {produto['descricao']}"
-    keyboard = [
-        [InlineKeyboardButton("🛒 Comprar Agora", callback_data=f"comprar_{item_id}")],
-        [InlineKeyboardButton("⬅️ Voltar ao Menu", callback_data="menu")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.message.reply_photo(
-        open(produto["imagem"], "rb"),
-        caption=caption,
-        parse_mode="Markdown",
+    await update.message.reply_text(
+        "👋 Escolha um plano IPTV abaixo:",
         reply_markup=reply_markup,
     )
 
@@ -203,81 +147,153 @@ async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     item_id = query.data.replace("comprar_", "")
     produto = produtos[item_id]
     user_id = query.from_user.id
-    user_name = query.from_user.full_name
-    registrar_pedido(user_id, produto["nome"], produto["preco"], produto["link"])
-    await avisar_admin(produto["nome"], produto["preco"], user_name, user_id)
+    registrar_pedido(user_id, produto["nome"], produto["preco"], produto["imagem"])
 
-    paypal_link = criar_link_paypal(produto["preco"])
-    
+    paypal_link = f"https://paypal.me/{PAYPAL_USER}/{produto['preco']}"
+
     mensagem = (
         f"✅ Você escolheu: *{produto['nome']}* - {produto['preco']}€\n\n"
         f"📺 {produto['descricao']}\n\n"
         f"💳 Pague com PayPal: {paypal_link}\n\n"
-        f"📩 Após realizar o pagamento, envie o comprovativo clicando aqui: "
-        f"[@{MEU_TELEGRAM}](https://t.me/{MEU_TELEGRAM})\n"
-        f"⏳ Seu pedido será validado e liberado em breve."
+        f"📩 Após realizar o pagamento, envie o comprovativo clicando no botão abaixo."
     )
+
+    keyboard = [
+        [InlineKeyboardButton("📩 Enviar comprovativo no privado", url=f"https://t.me/{MEU_TELEGRAM}")],
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
     await query.message.reply_photo(
         open(produto["imagem"], "rb"),
         caption=mensagem,
         parse_mode="Markdown",
+        reply_markup=reply_markup,
     )
 
-async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def receber_comprovativo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    if update.message.photo or update.message.document:
+        await update.message.reply_text("✅ Comprovativo recebido! Aguarde confirmação.")
+
+        caption = f"📩 Comprovativo de {user.full_name} (@{user.username}, ID: {user.id})"
+
+        # Botões inline para ADMIN aprovar/neg
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Confirmar", callback_data=f"confirmar_{user.id}"),
+                InlineKeyboardButton("❌ Negar", callback_data=f"negar_{user.id}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        if update.message.photo:
+            await context.bot.send_photo(ADMIN_ID, update.message.photo[-1].file_id,
+                                         caption=caption, reply_markup=reply_markup)
+        elif update.message.document:
+            await context.bot.send_document(ADMIN_ID, update.message.document.file_id,
+                                           caption=caption, reply_markup=reply_markup)
+    else:
+        await update.message.reply_text("⚠️ Envie o comprovativo como foto ou documento.")
+
+# =========================
+# CALLBACK BOTÕES COMPROVATIVO
+# =========================
+async def callback_comprovativo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if query.data == "menu":
-        await mostrar_menu(update, context)
-    elif query.data.startswith("produto_"):
-        await mostrar_produto(update, context)
-    elif query.data.startswith("comprar_"):
-        await comprar(update, context)
+    await query.answer()
+    data = query.data
+    action, user_id_str = data.split("_")
+    user_id = int(user_id_str)
 
-async def responder_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    pergunta = update.message.text
-    resposta = obter_resposta_chatgpt(pergunta, user_id)
-    keyboard = []
-    for key, p in produtos.items():
-        if str(p["preco"]) in resposta or p["nome"].lower() in resposta.lower():
-            keyboard.append([InlineKeyboardButton(f"🛒 Comprar {p['nome']}", callback_data=f"comprar_{key}")])
-    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-    await update.message.reply_text(resposta, reply_markup=reply_markup)
+    if query.from_user.id != ADMIN_ID:
+        await query.message.reply_text("❌ Apenas o ADMIN pode usar este botão.")
+        return
+
+    if action == "confirmar":
+        atualizar_status(user_id, "confirmado")
+        await context.bot.send_message(user_id, "🎉 Pagamento confirmado! Seu plano foi ativado. Aproveite o IPTV 🚀")
+        await query.message.edit_caption(query.message.caption + "\n\n✅ Pagamento confirmado pelo ADMIN")
+    elif action == "negar":
+        atualizar_status(user_id, "negado")
+        await context.bot.send_message(user_id,
+            "⚠️ Seu comprovativo foi analisado e *não foi aprovado*.\n\n"
+            "➡️ Verifique se o pagamento foi realizado corretamente e envie novamente o comprovativo válido."
+        )
+        await query.message.edit_caption(query.message.caption + "\n\n❌ Pagamento negado pelo ADMIN")
 
 # =========================
-# FASTAPI + WEBHOOK
+# COMANDOS ADMIN
 # =========================
-app = FastAPI()
-application = Application.builder().token(TOKEN).updater(None).build()
+async def confirmar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Não autorizado.")
+        return
+    if not context.args:
+        await update.message.reply_text("⚠️ Use: /confirmar <id_do_usuario>")
+        return
+    try:
+        user_id = int(context.args[0])
+        atualizar_status(user_id, "confirmado")
+        await context.bot.send_message(user_id, "🎉 Pagamento confirmado! Seu plano foi ativado. Aproveite o IPTV 🚀")
+        await update.message.reply_text(f"✅ Pagamento confirmado para usuário {user_id}")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Erro ao confirmar: {e}")
 
-# Handlers
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CallbackQueryHandler(callback_router))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder_ia))
+async def negar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Não autorizado.")
+        return
+    if not context.args:
+        await update.message.reply_text("⚠️ Use: /negar <id_do_usuario>")
+        return
+    try:
+        user_id = int(context.args[0])
+        atualizar_status(user_id, "negado")
+        await context.bot.send_message(user_id,
+            "⚠️ Seu comprovativo foi analisado e *não foi aprovado*.\n\n"
+            "➡️ Verifique se o pagamento foi realizado corretamente e envie novamente o comprovativo válido."
+        )
+        await update.message.reply_text(f"❌ Pagamento negado para usuário {user_id}")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Erro ao negar: {e}")
 
-@app.post("/webhook")
-async def webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, application.bot)
-    await application.update_queue.put(update)
-    return {"status": "ok"}
+async def pendentes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Não autorizado.")
+        return
+    
+    pedidos = listar_pendentes()
+    if not pedidos:
+        await update.message.reply_text("✅ Não há pedidos pendentes.")
+        return
 
-@app.get("/")
-def home():
-    return {"status": "🤖 Bot IPTV Futurista com IA ativo!"}
+    resposta = "📋 *Pedidos pendentes:*\n\n"
+    for pid, user_id, produto, preco in pedidos:
+        resposta += f"🆔 Pedido {pid} | 👤 User {user_id}\n📦 {produto} - {preco}€\n\n"
 
-async def start_webhook():
-    webhook_url = f"https://{RENDER_URL}/webhook"
-    await application.bot.set_webhook(webhook_url)
-    print(f"🌐 Webhook configurado: {webhook_url}")
+    await update.message.reply_text(resposta, parse_mode="Markdown")
 
-@app.on_event("startup")
-async def on_startup():
-    await application.initialize()
-    await application.start()
-    asyncio.create_task(start_webhook())
+# =========================
+# MAIN DO TELEGRAM BOT
+# =========================
+def run_bot():
+    application = Application.builder().token(BOT_TOKEN).build()
 
-@app.on_event("shutdown")
-async def on_shutdown():
-    await application.stop()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(comprar, pattern="^comprar_"))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, receber_comprovativo))
+    application.add_handler(CommandHandler("confirmar", confirmar))
+    application.add_handler(CommandHandler("negar", negar))
+    application.add_handler(CommandHandler("pendentes", pendentes))
+    application.add_handler(CallbackQueryHandler(callback_comprovativo, pattern="^(confirmar|negar)_"))
 
+    application.run_polling()
+
+# =========================
+# INICIAR
+# =========================
+if __name__ == "__main__":
+    init_db()
+    threading.Thread(target=run_bot, daemon=True).start()
+    uvicorn.run(app, host="0.0.0.0", port=10000)
