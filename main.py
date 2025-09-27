@@ -1,6 +1,7 @@
+
+
 # main.py
 import os
-import asyncio
 from fastapi import FastAPI, Request
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -20,22 +21,18 @@ pendentes = {}  # user_id : plano
 
 # ===================== BOT HANDLERS =====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Menu futurista com emojis e cores via HTML
     keyboard = [
         [InlineKeyboardButton("💠 Plano Básico - 5€", callback_data="plano_basico")],
         [InlineKeyboardButton("💎 Plano Premium - 10€", callback_data="plano_premium")],
         [InlineKeyboardButton("⚡ Suporte / Contato", url=f"https://t.me/{TELEGRAM_USER}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     message = (
         "<b>🎰 Bem-vindo ao Bot Futurista!</b>\n"
-        "Escolha seu plano e siga o pagamento via PayPal.\n\n"
         f"💳 Pague via PayPal: <b>{PAYPAL_USER}</b>\n"
         f"📤 Depois, envie o comprovativo clicando no meu usuário: @{TELEGRAM_USER}\n\n"
         "🛸 Menu futurista ativado!"
     )
-
     await update.message.reply_text(message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -44,15 +41,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     plano = query.data
     pendentes[user_id] = plano
-
-    message = (
+    await query.message.reply_text(
         f"✅ Você escolheu <b>{plano.replace('_',' ').title()}</b>.\n"
         f"💳 Pague via PayPal: <b>{PAYPAL_USER}</b>\n"
-        f"📤 Depois, envie o comprovativo clicando no meu usuário: @{TELEGRAM_USER}\n\n"
-        "🚀 Pagamento futurista iniciado!"
+        f"📤 Depois, envie o comprovativo clicando no meu usuário: @{TELEGRAM_USER}",
+        parse_mode=ParseMode.HTML
     )
-
-    await query.message.reply_text(message, parse_mode=ParseMode.HTML)
 
 async def pendentes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -104,6 +98,7 @@ application.add_handler(CommandHandler("pendentes", pendentes_cmd))
 application.add_handler(CommandHandler("confirmar", confirmar))
 application.add_handler(CommandHandler("negar", negar))
 
+# Webhook endpoint
 @app.post("/webhook")
 async def webhook(req: Request):
     data = await req.json()
@@ -111,13 +106,19 @@ async def webhook(req: Request):
     await application.update_queue.put(update)
     return {"ok": True}
 
-# ===================== EXECUÇÃO =====================
-async def start_bot():
+# ===================== START DO BOT =====================
+@app.on_event("startup")
+async def on_startup():
     await application.initialize()
     await application.start()
-    await application.updater.start_polling()
-    await application.updater.idle()
+    await application.updater.start_webhook(
+        listen="0.0.0.0",
+        port=int(os.getenv("PORT", 10000)),
+        url_path=BOT_TOKEN,
+    )
+    await application.updater.bot.set_webhook(f"https://SEU_DOMINIO.com/{BOT_TOKEN}")
 
-if __name__ == "__main__":
-    asyncio.run(start_bot())
-
+@app.on_event("shutdown")
+async def on_shutdown():
+    await application.updater.stop()
+    await application.stop()
