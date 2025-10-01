@@ -1,3 +1,6 @@
+
+
+
 import json
 import sqlite3
 import os
@@ -459,5 +462,3 @@ async def webhook(request: Request):
 @app.get("/")
 def home():
     return {"status": "🤖 Bot IPTV Futurista ativo!"}
-
-
