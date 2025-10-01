@@ -460,3 +460,4 @@ async def webhook(request: Request):
 def home():
     return {"status": "🤖 Bot IPTV Futurista ativo!"}
 
+
