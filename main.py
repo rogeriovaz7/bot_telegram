@@ -348,6 +348,9 @@ async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if user_id == ADMIN_ID:
+        return  # Ignora se for o admin enviando documento/foto
+
     pedido = get_pedido_pendente(user_id)
     if not pedido:
         await update.message.reply_text("❌ Você não tem pedidos pendentes. Faça uma compra primeiro.")
@@ -459,4 +462,5 @@ async def webhook(request: Request):
 @app.get("/")
 def home():
     return {"status": "🤖 Bot IPTV Futurista ativo!"}
+
 
