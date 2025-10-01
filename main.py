@@ -1,13 +1,16 @@
-import os
+import json
 import sqlite3
+import os
+import qrcode
+import asyncio
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
-    ContextTypes,
     MessageHandler,
+    ContextTypes,
     filters,
 )
 from openai import OpenAI
@@ -29,115 +32,210 @@ if not TOKEN or not OPENAI_API_KEY or not ADMIN_ID or not RENDER_URL:
     )
 
 client = OpenAI(api_key=OPENAI_API_KEY)
+DB_FILE = "pedidos.db"
+os.makedirs("qrcodes", exist_ok=True)
 
 # =========================
 # BANCO DE DADOS
 # =========================
-DB_FILE = "database.db"
-if not os.path.exists(DB_FILE):
+conn = sqlite3.connect(DB_FILE)
+cursor = conn.cursor()
+cursor.execute(
+    """
+CREATE TABLE IF NOT EXISTS pedidos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    produto TEXT,
+    preco REAL,
+    status TEXT,
+    link TEXT
+)
+"""
+)
+cursor.execute(
+    """
+CREATE TABLE IF NOT EXISTS usuarios (
+    user_id INTEGER PRIMARY KEY
+)
+"""
+)
+conn.commit()
+conn.close()
+
+with open("produtos.json", "r", encoding="utf-8") as f:
+    produtos = json.load(f)
+
+# =========================
+# FUNÇÕES DE PAGAMENTO E REGISTRO
+# =========================
+def registrar_pedido(user_id, produto, preco, link):
     conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, first_time INTEGER)")
-    c.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, produto TEXT, status TEXT)")
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO pedidos (user_id, produto, preco, status, link) VALUES (?, ?, ?, ?, ?)",
+        (user_id, produto, preco, "pendente", link),
+    )
     conn.commit()
     conn.close()
 
-# =========================
-# BOT TELEGRAM
-# =========================
-application = Application.builder().token(TOKEN).build()
 
-# IA integrada
-async def responder_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-    try:
-        resposta = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": user_text}],
-        )
-        reply = resposta.choices[0].message.content
-    except Exception as e:
-        reply = f"⚠️ Erro na IA: {e}"
-    await update.message.reply_text(reply)
+def criar_link_paypal(preco):
+    return f"https://www.paypal.com/paypalme/{PAYPAL_USER}/{preco}"
 
-# Menu principal
-async def mostrar_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("Produto 1", callback_data="produto_1")],
-        [InlineKeyboardButton("Produto 2", callback_data="produto_2")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.message.reply_text("📦 Escolhe um produto:", reply_markup=reply_markup)
 
-# Produto
-async def mostrar_produto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    produto_id = query.data.split("_")[1]
-    keyboard = [[InlineKeyboardButton("Comprar ✅", callback_data=f"comprar_{produto_id}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.message.reply_text(f"🛒 Produto {produto_id}\nPreço: 10€", reply_markup=reply_markup)
+def gerar_qrcode_mbway(user_id, produto_id, preco):
+    texto = f"Pagar {preco}€ para MB WAY: {MBWAY_NUMERO}"
+    qr_file = f"qrcodes/{user_id}_{produto_id}.png"
+    img = qrcode.make(texto)
+    img.save(qr_file)
+    return qr_file
 
-# Comprar
-async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    produto_id = query.data.split("_")[1]
 
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT INTO orders (user_id, produto, status) VALUES (?, ?, ?)",
-              (query.from_user.id, f"Produto {produto_id}", "pendente"))
-    order_id = c.lastrowid
-    conn.commit()
-    conn.close()
-
-    # Notificar cliente
-    await query.message.reply_text(
-        f"💳 Envia o pagamento para PayPal: {PAYPAL_USER}\n"
-        f"ou MBWAY: {MBWAY_NUMERO}\n"
-        f"ou Skrill: {SKRILL_EMAIL}\n\n"
-        "Depois envia o comprovativo para o admin."
+def criar_instrucao_skrill(preco, produto):
+    return (
+        f"💳 Para pagar com *Skrill*:\n\n"
+        f"➡️ Envie {preco}€ para o email: *{SKRILL_EMAIL}*\n"
+        f"📝 Referência: *Compra IPTV - {produto}*\n\n"
+        f"⚠️ Após o pagamento, envie o comprovativo ao suporte."
     )
 
-    # Notificar admin
-    keyboard = [
-        [InlineKeyboardButton("✅ Aprovar", callback_data=f"aprovar_{order_id}")],
-        [InlineKeyboardButton("❌ Negar", callback_data=f"negar_{order_id}")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    if ADMIN_ID != 0:
-        await application.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"📢 Novo pagamento pendente!\n\nPedido #{order_id}\nCliente: @{query.from_user.username}\nProduto: {produto_id}",
-            reply_markup=reply_markup
-        )
 
-# Admin decisão
-async def admin_decisao(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    action, order_id = query.data.split("_")
+async def avisar_admin(produto, preco, user_name, user_id):
+    msg = (
+        f"📦 Novo pedido recebido!\n"
+        f"👤 Usuário: {user_name} ({user_id})\n"
+        f"📺 Produto: {produto}\n"
+        f"💰 Preço: {preco}€\n"
+        f"⏳ Aguardando confirmação de pagamento.\n\n"
+        f"Para aprovar ou negar, responda com /aprovar {user_id} ou /negar {user_id}"
+    )
+    await application.bot.send_message(chat_id=ADMIN_ID, text=msg)
 
+
+# =========================
+# HANDLERS DO BOT
+# =========================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT user_id FROM orders WHERE id=?", (order_id,))
-    row = c.fetchone()
-    if not row:
-        await query.message.reply_text("⚠️ Pedido não encontrado.")
-        return
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM usuarios WHERE user_id = ?", (user_id,))
+    visto = cursor.fetchone()
 
-    user_id = row[0]
-
-    if action == "aprovar":
-        c.execute("UPDATE orders SET status=? WHERE id=?", ("aprovado", order_id))
-        await application.bot.send_message(chat_id=user_id, text="✅ O teu pagamento foi aprovado! O serviço está ativo.")
-    elif action == "negar":
-        c.execute("UPDATE orders SET status=? WHERE id=?", ("negado", order_id))
-        await application.bot.send_message(chat_id=user_id, text="❌ O teu pagamento foi negado. Revê o comprovativo.")
-    conn.commit()
+    if not visto:
+        intro_path = os.path.join("banners", "intro.mp4")
+        if os.path.exists(intro_path):
+            await update.message.reply_video(open(intro_path, "rb"), caption="🚀 Bem-vindo à Loja IPTV Futurista!")
+        cursor.execute("INSERT INTO usuarios (user_id) VALUES (?)", (user_id,))
+        conn.commit()
     conn.close()
 
-    await query.message.reply_text(f"Admin decidiu: {action.upper()} para pedido #{order_id}")
+    keyboard = [[InlineKeyboardButton("🚀 Iniciar", callback_data="menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "👋 Bem-vindo à *Loja IPTV Futurista*!\n\nClique em *Iniciar* para ver os planos disponíveis.",
+        parse_mode="Markdown",
+        reply_markup=reply_markup,
+    )
 
-# Callback router
+
+async def mostrar_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    keyboard = [
+        [InlineKeyboardButton(f"📺 {p['nome']} - {p['preco']}€", callback_data=f"produto_{key}")]
+        for key, p in produtos.items()
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.message.reply_text(
+        "🌌 *✨ Planos IPTV Futuristas Disponíveis ✨*\n\nEscolha seu plano abaixo:",
+        parse_mode="Markdown",
+        reply_markup=reply_markup,
+    )
+
+
+async def mostrar_produto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    produto_id = query.data.split("_")[1]
+    produto = produtos[produto_id]
+
+    imagem_map = {
+        "1mes": "iptv_1mes.jpg",
+        "3meses": "iptv_3meses.jpg",
+        "6meses": "iptv_6meses.jpg",
+    }
+    image_file = imagem_map.get(produto_id, "default.jpg")
+    image_path = os.path.join("banners", image_file)
+
+    caption = (
+        f"🌠 *{produto['nome']}*\n"
+        f"💰 *Preço:* {produto['preco']}€\n\n"
+        f"ℹ️ {produto['descricao']}\n\n"
+        f"Escolha uma opção abaixo para continuar:"
+    )
+    keyboard = [
+        [InlineKeyboardButton("🛒 Comprar Agora", callback_data=f"comprar_{produto_id}")],
+        [InlineKeyboardButton("⬅️ Voltar ao Menu", callback_data="menu")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.message.reply_photo(open(image_path, "rb"), caption=caption, parse_mode="Markdown", reply_markup=reply_markup)
+
+
+async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    produto_id = query.data.split("_")[1]
+    produto = produtos[produto_id]
+    user_id = query.from_user.id
+    user_name = query.from_user.full_name
+
+    registrar_pedido(user_id, produto["nome"], produto["preco"], produto["link"])
+    await avisar_admin(produto["nome"], produto["preco"], user_name, user_id)
+
+    qr_file = gerar_qrcode_mbway(user_id, produto_id, produto["preco"])
+    paypal_link = criar_link_paypal(produto["preco"])
+    skrill_instrucao = criar_instrucao_skrill(produto["preco"], produto["nome"])
+
+    mensagem = (
+        f"✅ Você escolheu: *{produto['nome']}* - {produto['preco']}€\n\n"
+        f"💳 *Métodos de Pagamento*:\n"
+        f"👉 PayPal: {paypal_link}\n"
+        f"👉 MB WAY: *{MBWAY_NUMERO}* (QR code abaixo)\n"
+        f"👉 Skrill: veja instruções 👇\n\n"
+        f"{skrill_instrucao}\n\n"
+        "⏳ Após o pagamento, aguarde aprovação do administrador."
+    )
+    await query.message.reply_photo(open(qr_file, "rb"), caption=mensagem, parse_mode="Markdown")
+
+
+# =========================
+# IA INTEGRADA
+# =========================
+async def responder_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_msg = update.message.text
+
+    prompt = f"""
+Você é um assistente de vendas futurista para IPTV. 
+O usuário perguntou: "{user_msg}"
+Sugira o melhor produto IPTV disponível na loja, com base na pergunta.
+Se for uma pergunta geral, responda normalmente.
+Os produtos disponíveis são:
+{json.dumps(produtos, ensure_ascii=False)}
+Responda em português.
+"""
+    resposta = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.8
+    )
+    reply_text = resposta.choices[0].message.content
+    await update.message.reply_text(reply_text)
+
+
+# =========================
+# ROUTER E COMANDOS ADMIN
+# =========================
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query.data == "menu":
@@ -147,67 +245,67 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("comprar_"):
         await comprar(update, context)
 
-# Start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def aprovar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    user_id = int(context.args[0])
     conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT first_time FROM users WHERE id=?", (update.effective_user.id,))
-    row = c.fetchone()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE pedidos SET status = 'aprovado' WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(f"✅ Pedido do usuário {user_id} aprovado.")
 
-    if row is None:
-        c.execute("INSERT INTO users (id, username, first_time) VALUES (?, ?, ?)",
-                  (update.effective_user.id, update.effective_user.username, 1))
-        conn.commit()
-        conn.close()
 
-        # Primeira vez → vídeo
-        video_path = "intro.mp4"
-        if os.path.exists(video_path):
-            await update.message.reply_video(video=open(video_path, "rb"))
-        await update.message.reply_text("👋 Bem-vindo ao Bot! Usa o menu abaixo:")
-    else:
-        conn.close()
-        await update.message.reply_text("👋 Bem-vindo de volta! Usa o menu abaixo:")
+async def negar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    user_id = int(context.args[0])
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE pedidos SET status = 'negado' WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(f"❌ Pedido do usuário {user_id} negado.")
 
-    keyboard = [[InlineKeyboardButton("📦 Menu", callback_data="menu")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Escolhe uma opção:", reply_markup=reply_markup)
 
 # =========================
-# HANDLERS
-# =========================
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CallbackQueryHandler(callback_router, pattern="^(menu|produto_|comprar_)"))
-application.add_handler(CallbackQueryHandler(admin_decisao, pattern="^(aprovar|negar)_"))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder_ia))
-
-# =========================
-# FASTAPI WEBHOOK
+# FASTAPI + WEBHOOK
 # =========================
 app = FastAPI()
+application = Application.builder().token(TOKEN).build()
 
-@app.post(f"/{TOKEN}")
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("aprovar", aprovar))
+application.add_handler(CommandHandler("negar", negar))
+application.add_handler(CallbackQueryHandler(callback_router))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder_ia))
+
+
+@app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
     update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return {"ok": True}
+    await application.update_queue.put(update)
+    return {"status": "ok"}
+
 
 @app.on_event("startup")
-async def startup_event():
+async def on_startup():
     await application.initialize()
     await application.start()
-    if RENDER_URL:
-        await application.bot.set_webhook(f"{RENDER_URL}/{TOKEN}")
+    webhook_url = f"https://{RENDER_URL}/webhook"
+    await application.bot.set_webhook(webhook_url)
+    print(f"🌐 Webhook configurado: {webhook_url}")
+
 
 @app.on_event("shutdown")
-async def shutdown_event():
+async def on_shutdown():
     await application.stop()
 
-# =========================
-# EXECUÇÃO LOCAL OU RENDER
-# =========================
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 10000))  # Render define $PORT, local usa 10000
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+
+@app.get("/")
+def home():
+    return {"status": "🤖 Bot IPTV Futurista ativo!"}
+
