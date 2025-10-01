@@ -459,3 +459,4 @@ async def webhook(request: Request):
 @app.get("/")
 def home():
     return {"status": "🤖 Bot IPTV Futurista ativo!"}
+
