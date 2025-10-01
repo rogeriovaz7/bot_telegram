@@ -1,7 +1,3 @@
-
-
-
-
 import json
 import sqlite3
 import os
@@ -9,7 +5,7 @@ import qrcode
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot, Document
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -52,7 +48,7 @@ CREATE TABLE IF NOT EXISTS pedidos (
     user_id INTEGER,
     produto TEXT,
     preco REAL,
-    status TEXT,
+    status TEXT DEFAULT 'pendente',
     link TEXT
 )
 """
@@ -82,10 +78,12 @@ def registrar_pedido(user_id, produto, preco, link):
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO pedidos (user_id, produto, preco, status, link) VALUES (?, ?, ?, ?, ?)",
-            (user_id, produto, preco, "pendente", link),
+            "INSERT INTO pedidos (user_id, produto, preco, link) VALUES (?, ?, ?, ?)",
+            (user_id, produto, preco, link),
         )
+        pedido_id = cursor.lastrowid
         conn.commit()
+        return pedido_id
     except sqlite3.Error as e:
         print(f"Erro no BD ao registrar pedido: {e}")
         raise
@@ -94,11 +92,67 @@ def registrar_pedido(user_id, produto, preco, link):
             conn.close()
 
 
+def get_pedido_pendente(user_id):
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, produto, preco FROM pedidos WHERE user_id = ? AND status = 'pendente' ORDER BY id DESC LIMIT 1",
+            (user_id,)
+        )
+        result = cursor.fetchone()
+        conn.close()
+        if result:
+            return {"id": result[0], "produto": result[1], "preco": result[2]}
+        return None
+    except sqlite3.Error as e:
+        print(f"Erro no BD ao buscar pedido pendente: {e}")
+        return None
+
+
+def get_pedido_by_id(pedido_id):
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT user_id, produto, preco, link FROM pedidos WHERE id = ?",
+            (pedido_id,)
+        )
+        result = cursor.fetchone()
+        conn.close()
+        if result:
+            return {"user_id": result[0], "produto": result[1], "preco": result[2], "link": result[3]}
+        return None
+    except sqlite3.Error as e:
+        print(f"Erro no BD ao buscar pedido por ID: {e}")
+        return None
+
+
+def atualizar_status_pedido(pedido_id, status):
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE pedidos SET status = ? WHERE id = ?",
+            (status, pedido_id),
+        )
+        conn.commit()
+        conn.close()
+        return cursor.rowcount > 0
+    except sqlite3.Error as e:
+        print(f"Erro no BD ao atualizar status: {e}")
+        return False
+
+
 def criar_link_paypal(preco):
-    return f"https://www.paypal.com/paypalme/{PAYPAL_USER}/{preco}"
+    if PAYPAL_USER:
+        return f"https://www.paypal.com/paypalme/{PAYPAL_USER}/{preco}"
+    return None
 
 
 def gerar_qrcode_mbway(user_id, produto_id, preco):
+    if not MBWAY_NUMERO:
+        return None
     texto = f"Pagar {preco}€ para MB WAY: {MBWAY_NUMERO}"
     qr_file = f"qrcodes/{user_id}_{produto_id}.png"
     img = qrcode.make(texto)
@@ -107,23 +161,37 @@ def gerar_qrcode_mbway(user_id, produto_id, preco):
 
 
 def criar_instrucao_skrill(preco, produto):
+    if not SKRILL_EMAIL:
+        return ""
     return (
         f"💳 Para pagar com *Skrill*:\n\n"
         f"➡️ Envie {preco}€ para o email: *{SKRILL_EMAIL}*\n"
         f"📝 Referência: *Compra IPTV - {produto}*\n\n"
-        f"⚠️ Após o pagamento, envie o comprovativo ao suporte."
+        f"⚠️ Após o pagamento, envie o comprovativo ao bot."
     )
 
 
-async def avisar_admin(application, produto, preco, user_name, user_id):
+async def avisar_admin(application, pedido_id, produto, preco, user_name, user_id):
     msg = (
-        f"📦 Novo pedido recebido!\n"
+        f"📦 Novo pedido recebido! ID: #{pedido_id}\n"
         f"👤 Usuário: {user_name} ({user_id})\n"
         f"📺 Produto: {produto}\n"
         f"💰 Preço: {preco}€\n"
-        f"⏳ Aguardando confirmação de pagamento."
+        f"⏳ Aguardando comprovativo e confirmação."
     )
     await application.bot.send_message(chat_id=ADMIN_ID, text=msg)
+
+
+async def notificar_usuario(application, user_id, mensagem, link=None):
+    try:
+        if link:
+            keyboard = [[InlineKeyboardButton("🔗 Acessar IPTV", url=link)]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await application.bot.send_message(chat_id=user_id, text=mensagem, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await application.bot.send_message(chat_id=user_id, text=mensagem, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        print(f"Erro ao notificar usuário {user_id}: {e}")
 
 
 # =========================
@@ -177,10 +245,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM pedidos WHERE status='pendente'")
         pending = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM pedidos WHERE status='aprovado'")
+        approved = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM pedidos")
         total = cursor.fetchone()[0]
         conn.close()
-        await update.message.reply_text(f"📊 Pedidos pendentes: {pending} / Total: {total}")
+        await update.message.reply_text(f"📊 Pedidos: Pendentes: {pending} | Aprovados: {approved} | Total: {total}")
     except sqlite3.Error as e:
         await update.message.reply_text(f"❌ Erro ao consultar BD: {e}")
 
@@ -237,10 +307,10 @@ async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     produto = produtos[item_id]
     user_id = query.from_user.id
-    user_name = query.from_user.full_name or "Usuário Anônimo"  # Sanitize se necessário
+    user_name = query.from_user.full_name or "Usuário Anônimo"
     try:
-        registrar_pedido(user_id, produto["nome"], produto["preco"], produto["link"])
-        await avisar_admin(context.application, produto["nome"], produto["preco"], user_name, user_id)
+        pedido_id = registrar_pedido(user_id, produto["nome"], produto["preco"], produto["link"])
+        await avisar_admin(context.application, pedido_id, produto["nome"], produto["preco"], user_name, user_id)
     except Exception as e:
         await query.message.reply_text("❌ Erro ao registrar pedido. Tente novamente.")
         print(f"Erro ao registrar pedido: {e}")
@@ -249,17 +319,23 @@ async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     qr_file = gerar_qrcode_mbway(user_id, item_id, produto["preco"])
     paypal_link = criar_link_paypal(produto["preco"])
     skrill_instrucao = criar_instrucao_skrill(produto["preco"], produto["nome"])
+    payment_options = []
+    if paypal_link:
+        payment_options.append(f"👉 PayPal: {paypal_link}")
+    if MBWAY_NUMERO:
+        payment_options.append(f"👉 MB WAY: *{MBWAY_NUMERO}* (QR code abaixo)")
+    if SKRILL_EMAIL:
+        payment_options.append("👉 Skrill: veja instruções abaixo 👇")
     mensagem = (
         f"✅ Você escolheu: *{produto['nome']}* - {produto['preco']}€\n\n"
         f"📺 {produto['descricao']}\n\n"
         f"💳 Métodos de Pagamento:\n"
-        f"👉 PayPal: {paypal_link}\n"
-        f"👉 MB WAY: *{MBWAY_NUMERO}* (QR code abaixo)\n"
-        f"👉 Skrill: veja instruções abaixo 👇\n\n"
-        f"{skrill_instrucao}\n\n"
-        "Após o pagamento, aguarde liberação do acesso."
+        f"{' '.join(payment_options)}\n\n"
     )
-    if os.path.exists(qr_file):
+    if skrill_instrucao:
+        mensagem += f"{skrill_instrucao}\n\n"
+    mensagem += "⚠️ *Após o pagamento, envie o comprovativo (foto ou documento) diretamente para este bot* para liberação rápida do acesso."
+    if qr_file and os.path.exists(qr_file):
         try:
             with open(qr_file, "rb") as qr_photo:
                 await query.message.reply_photo(qr_photo, caption=mensagem, parse_mode=ParseMode.MARKDOWN)
@@ -270,14 +346,70 @@ async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(mensagem, parse_mode=ParseMode.MARKDOWN)
 
 
+async def handle_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    pedido = get_pedido_pendente(user_id)
+    if not pedido:
+        await update.message.reply_text("❌ Você não tem pedidos pendentes. Faça uma compra primeiro.")
+        return
+
+    caption = f"📎 Comprovativo para pedido #{pedido['id']} - {pedido['produto']} ({pedido['preco']}€) de usuário {user_id}"
+    keyboard = [
+        [InlineKeyboardButton("✅ Aprovar", callback_data=f"approve_{pedido['id']}")],
+        [InlineKeyboardButton("❌ Rejeitar", callback_data=f"reject_{pedido['id']}")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    try:
+        if update.message.document:
+            await context.bot.send_document(ADMIN_ID, document=update.message.document.file_id, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+        elif update.message.photo:
+            await context.bot.send_photo(ADMIN_ID, photo=update.message.photo[-1].file_id, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("✅ Comprovativo recebido! Aguardando aprovação do pagamento.")
+    except Exception as e:
+        print(f"Erro ao encaminhar comprovativo: {e}")
+        await update.message.reply_text("❌ Erro ao processar comprovativo. Tente novamente.")
+
+
+async def handle_approve(application, pedido_id, query):
+    pedido = get_pedido_by_id(pedido_id)
+    if not pedido:
+        await query.answer("❌ Pedido não encontrado.")
+        return
+    if atualizar_status_pedido(pedido_id, 'aprovado'):
+        await notificar_usuario(application, pedido['user_id'], f"✅ Seu pagamento para *{pedido['produto']}* foi aprovado!\n\nAproveite o serviço.", pedido['link'])
+        await query.edit_message_text("✅ Pedido aprovado e usuário notificado!")
+    else:
+        await query.answer("❌ Erro ao aprovar o pedido.")
+
+
+async def handle_reject(application, pedido_id, query):
+    pedido = get_pedido_by_id(pedido_id)
+    if not pedido:
+        await query.answer("❌ Pedido não encontrado.")
+        return
+    if atualizar_status_pedido(pedido_id, 'rejeitado'):
+        await notificar_usuario(application, pedido['user_id'], "❌ Seu pagamento não foi aprovado. Verifique os detalhes e tente novamente, ou contate o suporte.")
+        await query.edit_message_text("❌ Pedido rejeitado e usuário notificado!")
+    else:
+        await query.answer("❌ Erro ao rejeitar o pedido.")
+
+
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    await query.answer()
     if query.data == "menu":
         await mostrar_menu(update, context)
     elif query.data.startswith("produto_"):
         await mostrar_produto(update, context)
     elif query.data.startswith("comprar_"):
         await comprar(update, context)
+    elif query.data.startswith("approve_"):
+        pedido_id = query.data.replace("approve_", "")
+        await handle_approve(context.application, int(pedido_id), query)
+    elif query.data.startswith("reject_"):
+        pedido_id = query.data.replace("reject_", "")
+        await handle_reject(context.application, int(pedido_id), query)
 
 
 # =========================
@@ -300,6 +432,7 @@ application = Application.builder().token(TOKEN).updater(None).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("status", status))
 application.add_handler(CallbackQueryHandler(callback_router))
+application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_proof))
 
 
 async def start_webhook():
