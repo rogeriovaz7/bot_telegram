@@ -1,3 +1,5 @@
+
+
 import json
 import sqlite3
 import os
@@ -362,9 +364,9 @@ async def handle_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if update.message.document:
-            await context.bot.send_document(ADMIN_ID, document=update.message.document.file_id, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+            await context.bot.send_document(chat_id=ADMIN_ID, document=update.message.document.file_id, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
         elif update.message.photo:
-            await context.bot.send_photo(ADMIN_ID, photo=update.message.photo[-1].file_id, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+            await context.bot.send_photo(chat_id=ADMIN_ID, photo=update.message.photo[-1].file_id, caption=caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
         await update.message.reply_text("✅ Comprovativo recebido! Aguardando aprovação do pagamento.")
     except Exception as e:
         print(f"Erro ao encaminhar comprovativo: {e}")
