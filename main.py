@@ -1,5 +1,3 @@
-
-
 import json
 import sqlite3
 import os
@@ -374,6 +372,9 @@ async def handle_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_approve(application, pedido_id, query):
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("❌ Acesso negado.")
+        return
     pedido = get_pedido_by_id(pedido_id)
     if not pedido:
         await query.answer("❌ Pedido não encontrado.")
@@ -386,6 +387,9 @@ async def handle_approve(application, pedido_id, query):
 
 
 async def handle_reject(application, pedido_id, query):
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("❌ Acesso negado.")
+        return
     pedido = get_pedido_by_id(pedido_id)
     if not pedido:
         await query.answer("❌ Pedido não encontrado.")
