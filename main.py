@@ -1,3 +1,5 @@
+
+
 import json
 import sqlite3
 import os
@@ -20,7 +22,7 @@ from telegram.constants import ParseMode
 # CONFIGURAÇÃO VIA VARIÁVEIS DE AMBIENTE
 # =========================
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # ID do Telegram para @T_Zav
+ADMIN_ID = int(os.getenv("ADMIN_ID", "886057996"))
 PAYPAL_USER = os.getenv("PAYPAL_USER")
 MBWAY_NUMERO = os.getenv("MBWAY_NUMERO")
 SKRILL_EMAIL = os.getenv("SKRILL_EMAIL")
@@ -462,4 +464,3 @@ async def webhook(request: Request):
 @app.get("/")
 def home():
     return {"status": "🤖 Bot IPTV Futurista ativo!"}
-
