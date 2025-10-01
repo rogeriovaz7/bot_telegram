@@ -1,12 +1,17 @@
-
+import json
+import sqlite3
 import os
+import qrcode
 import asyncio
 from fastapi import FastAPI, Request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-import qrcode
-import io
-import openai
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
+from openai import OpenAI
 
 # =========================
 # CONFIGURAÇÃO VIA VARIÁVEIS DE AMBIENTE
@@ -14,125 +19,246 @@ import openai
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+PAYPAL_USER = os.getenv("PAYPAL_USER")
+MBWAY_NUMERO = os.getenv("MBWAY_NUMERO")
+SKRILL_EMAIL = os.getenv("SKRILL_EMAIL")
 RENDER_URL = os.getenv("RENDER_URL")
 
-openai.api_key = OPENAI_API_KEY
+if not TOKEN or not OPENAI_API_KEY or not ADMIN_ID or not RENDER_URL:
+    raise RuntimeError(
+        "⚠️ Configure todas as variáveis de ambiente: BOT_TOKEN, ADMIN_ID, OPENAI_API_KEY, RENDER_URL"
+    )
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+DB_FILE = "pedidos.db"
+os.makedirs("qrcodes", exist_ok=True)
 
 # =========================
-# CONFIGURAÇÃO DO FASTAPI
+# BANCO DE DADOS
 # =========================
-app = FastAPI()
-application = None  # Será inicializado no startup
+conn = sqlite3.connect(DB_FILE)
+cursor = conn.cursor()
+
+# Tabela de pedidos
+cursor.execute(
+    """
+CREATE TABLE IF NOT EXISTS pedidos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    produto TEXT,
+    preco REAL,
+    status TEXT,
+    link TEXT
+)
+"""
+)
+
+# Tabela de usuários (para intro)
+cursor.execute(
+    """
+CREATE TABLE IF NOT EXISTS usuarios (
+    user_id INTEGER PRIMARY KEY
+)
+"""
+)
+
+conn.commit()
+conn.close()
+
+with open("produtos.json", "r", encoding="utf-8") as f:
+    produtos = json.load(f)
+
 
 # =========================
-# DADOS DE PRODUTOS
+# FUNÇÕES DE PAGAMENTO E REGISTRO
 # =========================
-PRODUCTS = {
-    "iptv_1mes": {"nome": "IPTV 1 Mês", "preco": 5, "arquivo": "banners/iptv_1mes.jpg"},
-    "iptv_3meses": {"nome": "IPTV 3 Meses", "preco": 12, "arquivo": "banners/iptv_3meses.jpg"},
-    "iptv_6meses": {"nome": "IPTV 6 Meses", "preco": 20, "arquivo": "banners/iptv_6meses.jpg"},
-    "iptv_12meses": {"nome": "IPTV 12 Meses", "preco": 35, "arquivo": "banners/iptv_12meses.jpg"},  # NOVO
-}
+def registrar_pedido(user_id, produto, preco, link):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO pedidos (user_id, produto, preco, status, link) VALUES (?, ?, ?, ?, ?)",
+        (user_id, produto, preco, "pendente", link),
+    )
+    conn.commit()
+    conn.close()
+
+
+def criar_link_paypal(preco):
+    return f"https://www.paypal.com/paypalme/{PAYPAL_USER}/{preco}"
+
+
+def gerar_qrcode_mbway(user_id, produto_id, preco):
+    texto = f"Pagar {preco}€ para MB WAY: {MBWAY_NUMERO}"
+    qr_file = f"qrcodes/{user_id}_{produto_id}.png"
+    img = qrcode.make(texto)
+    img.save(qr_file)
+    return qr_file
+
+
+def criar_instrucao_skrill(preco, produto):
+    return (
+        f"💳 Para pagar com *Skrill*:\n\n"
+        f"➡️ Envie {preco}€ para o email: *{SKRILL_EMAIL}*\n"
+        f"📝 Referência: *Compra IPTV - {produto}*\n\n"
+        f"⚠️ Após o pagamento, envie o comprovativo ao suporte."
+    )
+
+
+async def avisar_admin(produto, preco, user_name, user_id):
+    msg = (
+        f"📦 Novo pedido recebido!\n"
+        f"👤 Usuário: {user_name} ({user_id})\n"
+        f"📺 Produto: {produto}\n"
+        f"💰 Preço: {preco}€\n"
+        f"⏳ Aguardando confirmação de pagamento."
+    )
+    await application.bot.send_message(chat_id=ADMIN_ID, text=msg)
 
 
 # =========================
-# HELPERS
-# =========================
-async def send_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Envia vídeo de boas-vindas na primeira interação"""
-    chat_id = update.effective_chat.id
-    await context.bot.send_message(chat_id, "Bem-vindo! Aqui está o vídeo de introdução:")
-    # vídeo fictício local ou URL
-    video_path = "banners/welcome.mp4"
-    if os.path.exists(video_path):
-        await context.bot.send_video(chat_id, video=open(video_path, "rb"))
-
-async def ask_ai(question: str) -> str:
-    """Chama a OpenAI para responder perguntas do usuário"""
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role":"user","content":question}],
-            max_tokens=300
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"Erro na IA: {e}"
-
-# =========================
-# HANDLERS
+# HANDLERS DO BOT
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_welcome(update, context)
+    user_id = update.effective_user.id
 
-    keyboard = [
-        [InlineKeyboardButton(p["nome"], callback_data=key)]
-        for key, p in PRODUCTS.items()
-    ]
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM usuarios WHERE user_id = ?", (user_id,))
+    visto = cursor.fetchone()
+
+    if not visto:
+        # Enviar intro só na primeira vez
+        intro_path = os.path.join("banners", "intro.mp4")
+
+        if os.path.exists(intro_path):
+            await update.message.reply_video(open(intro_path, "rb"), caption="🚀 Bem-vindo à Loja IPTV Futurista!")
+        # Registra que já viu
+        cursor.execute("INSERT INTO usuarios (user_id) VALUES (?)", (user_id,))
+        conn.commit()
+
+    conn.close()
+
+    keyboard = [[InlineKeyboardButton("🚀 Iniciar", callback_data="menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(update.effective_chat.id, "Escolha um produto:", reply_markup=reply_markup)
+    await update.message.reply_text(
+        "👋 Bem-vindo à *Loja IPTV Futurista*!\n\nClique em *Iniciar* para ver os planos disponíveis.",
+        parse_mode="Markdown",
+        reply_markup=reply_markup,
+    )
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def mostrar_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    produto_key = query.data
-    produto = PRODUCTS.get(produto_key)
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"📺 {produto['nome']} - {produto['preco']}€",
+                callback_data=f"produto_{key}",
+            )
+        ]
+        for key, produto in produtos.items()
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.message.reply_text(
+        "🚀 Escolha um dos planos IPTV futuristas abaixo:", reply_markup=reply_markup
+    )
 
-    if produto:
-        # Cria QR code fictício para pagamento
-        qr = qrcode.QRCode(box_size=6, border=2)
-        qr.add_data(f"Pagamento {produto['nome']} - Preço: {produto['preco']}€")
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        bio = io.BytesIO()
-        img.save(bio, format="PNG")
-        bio.seek(0)
 
-        await context.bot.send_photo(query.message.chat.id, photo=bio, caption=f"Escaneie para pagar: {produto['nome']} - {produto['preco']}€")
-        # Notificação para o ADMIN
-        await context.bot.send_message(ADMIN_ID, f"Usuário {query.from_user.username} escolheu {produto['nome']}. Aprove ou negue o pagamento.")
+async def mostrar_produto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    item_id = query.data.replace("produto_", "")
+    produto = produtos[item_id]
+    caption = f"📺 *{produto['nome']}*\n💰 {produto['preco']}€\n\nℹ️ {produto['descricao']}"
+    keyboard = [
+        [InlineKeyboardButton("🛒 Comprar Agora", callback_data=f"comprar_{item_id}")],
+        [InlineKeyboardButton("⬅️ Voltar ao Menu", callback_data="menu")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.message.reply_photo(
+        open(produto["imagem"], "rb"), caption=caption, parse_mode="Markdown", reply_markup=reply_markup
+    )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Envia pergunta para IA se não for comando"""
-    resposta = await ask_ai(update.message.text)
-    await update.message.reply_text(resposta)
+
+async def comprar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    item_id = query.data.replace("comprar_", "")
+    produto = produtos[item_id]
+    user_id = query.from_user.id
+    user_name = query.from_user.full_name
+    registrar_pedido(user_id, produto["nome"], produto["preco"], produto["link"])
+    await avisar_admin(produto["nome"], produto["preco"], user_name, user_id)
+    qr_file = gerar_qrcode_mbway(user_id, item_id, produto["preco"])
+    paypal_link = criar_link_paypal(produto["preco"])
+    skrill_instrucao = criar_instrucao_skrill(produto["preco"], produto["nome"])
+    mensagem = (
+        f"✅ Você escolheu: *{produto['nome']}* - {produto['preco']}€\n\n"
+        f"📺 {produto['descricao']}\n\n"
+        f"💳 Métodos de Pagamento:\n"
+        f"👉 PayPal: {paypal_link}\n"
+        f"👉 MB WAY: *{MBWAY_NUMERO}* (QR code abaixo)\n"
+        f"👉 Skrill: veja instruções abaixo 👇\n\n"
+        f"{skrill_instrucao}\n\n"
+        "Após o pagamento, aguarde liberação do acesso."
+    )
+    await query.message.reply_photo(open(qr_file, "rb"), caption=mensagem, parse_mode="Markdown")
+
+
+async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.data == "menu":
+        await mostrar_menu(update, context)
+    elif query.data.startswith("produto_"):
+        await mostrar_produto(update, context)
+    elif query.data.startswith("comprar_"):
+        await comprar(update, context)
+
 
 # =========================
-# FASTAPI WEBHOOK
+# FASTAPI + WEBHOOK
 # =========================
-@app.on_event("startup")
-async def startup():
-    global application
-    application = Application.builder().token(TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+app = FastAPI()
+application = Application.builder().token(TOKEN).updater(None).build()
 
-    # Start webhook
-    # Em Render: usamos webhook + FastAPI
-    from telegram.ext import BasePersistence
-    persistence = BasePersistence()
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()  # Em Render webhook, polling não é recomendado, mas funciona para testes
-    print("Bot iniciado.")
+# Registrar handlers
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CallbackQueryHandler(callback_router))
 
-@app.post(f"/webhook/{TOKEN}")
-async def telegram_webhook(request: Request):
-    """Recebe updates do Telegram via webhook"""
+
+@app.post("/webhook")
+async def webhook(request: Request):
     data = await request.json()
     update = Update.de_json(data, application.bot)
+
     await application.update_queue.put(update)
     return {"status": "ok"}
 
-# Endpoint de teste
-@app.get("/")
-def index():
-    return {"status": "Bot rodando"}
 
-# =========================
-# EXECUÇÃO LOCAL
-# =========================
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+@app.get("/")
+def home():
+    return {"status": "🤖 Bot IPTV Futurista ativo!"}
+
+
+async def start_webhook():
+    webhook_url = f"https://{RENDER_URL}/webhook"
+    await application.bot.set_webhook(webhook_url)
+    print(f"🌐 Webhook configurado: {webhook_url}")
+
+
+@app.on_event("startup")
+async def on_startup():
+    await application.initialize()
+    await application.start()
+    asyncio.create_task(start_webhook())
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await application.stop()
+
+
+
+
+
