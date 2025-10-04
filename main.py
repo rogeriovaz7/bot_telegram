@@ -1,5 +1,3 @@
-
-
 import json
 import sqlite3
 import os
@@ -22,15 +20,15 @@ from telegram.constants import ParseMode
 # CONFIGURAÇÃO VIA VARIÁVEIS DE AMBIENTE
 # =========================
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "886057996"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "886057996"))  # ID do Telegram para @T_Zav
 PAYPAL_USER = os.getenv("PAYPAL_USER")
 MBWAY_NUMERO = os.getenv("MBWAY_NUMERO")
 SKRILL_EMAIL = os.getenv("SKRILL_EMAIL")
 RENDER_URL = os.getenv("RENDER_URL")
 
-if not TOKEN or not ADMIN_ID or not RENDER_URL:
+if not TOKEN or not RENDER_URL:
     raise RuntimeError(
-        "⚠️ Configure todas as variáveis de ambiente: BOT_TOKEN, ADMIN_ID, RENDER_URL"
+        "⚠️ Configure todas as variáveis de ambiente: BOT_TOKEN, RENDER_URL"
     )
 
 DB_FILE = "pedidos.db"
